@@ -1,0 +1,9 @@
+fastapi
+uvicorn[standard]
+requests
+httpx
+pymupdf
+pydantic-settings
+python-dotenv
+SQLAlchemy
+psycopg2-binary
