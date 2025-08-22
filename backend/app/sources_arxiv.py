@@ -1,7 +1,7 @@
 import httpx
 import xml.etree.ElementTree as ET
 
-ARXIV_API = "http://export.arxiv.org/api/query"
+ARXIV_API = "https://export.arxiv.org/api/query"
 
 async def search_arxiv_async(query: str, limit: int = 5) -> list[dict]:
     params = {

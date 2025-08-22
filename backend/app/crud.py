@@ -1,9 +1,8 @@
 # backend/app/crud.py
 
-from typing import List, Dict, Any, Optional
+from typing import List, Dict, Any, Optional, Iterable
 from sqlalchemy.orm import Session
-from sqlalchemy.exc import IntegrityError, SQLAlchemyError
-from sqlalchemy import text
+from sqlalchemy.exc import IntegrityError
 
 from .models import Paper, Author, PaperAuthor, Keyword, PaperKeyword
 
@@ -17,9 +16,6 @@ def _to_float_list(v) -> Optional[List[float]]:
     except Exception:
         return None
 
-def _cast_vector_literal(emb: List[float], dim: int = 768) -> str:
-    # pgvector literal formatı: "[0.1,0.2,...]"
-    return "[" + ",".join(str(float(x)) for x in emb) + "]"
 
 def get_or_create_author(db: Session, name: str) -> Author:
     name = (name or "").strip()
@@ -31,6 +27,7 @@ def get_or_create_author(db: Session, name: str) -> Author:
     db.flush()
     return a
 
+
 def get_or_create_keyword(db: Session, term: str) -> Keyword:
     term = (term or "").strip()
     k = db.query(Keyword).filter(Keyword.term == term).one_or_none()
@@ -41,12 +38,13 @@ def get_or_create_keyword(db: Session, term: str) -> Keyword:
     db.flush()
     return k
 
+
 # ---- çekirdek CRUD ----------------------------------------------------------
 
 def add_paper_record(db: Session, rec: Dict[str, Any]) -> Optional[Paper]:
     """
     DOI varsa DOI, yoksa url_pdf üzerinden tekilleştirir.
-    Özet/embedding varsa günceller. pgvector (embedding_v) de doldurulur.
+    Özet/embedding varsa günceller. (pgvector ZORUNLU DEĞİL — yalnızca Python list 'embedding' saklanır.)
     """
     # normalizasyon
     doi = (rec.get("doi") or "").strip() or None
@@ -101,6 +99,7 @@ def add_paper_record(db: Session, rec: Dict[str, Any]) -> Optional[Paper]:
                 continue
             a = get_or_create_author(db, name)
             db.add(PaperAuthor(paper_id=p.id, author_id=a.id, author_order=idx + 1))
+
         existing_keywords = {pk.keyword.term for pk in p.keywords}
         for term in keywords_in:
             term = (term or "").strip()
@@ -109,13 +108,6 @@ def add_paper_record(db: Session, rec: Dict[str, Any]) -> Optional[Paper]:
             k = get_or_create_keyword(db, term)
             db.add(PaperKeyword(paper_id=p.id, keyword_id=k.id))
 
-        # embedding_v (pgvector) doldur/güncelle
-        if emb_list:
-            vec = _cast_vector_literal(emb_list)
-            db.execute(
-                text("UPDATE papers SET embedding_v = CAST(:vec AS vector(768)) WHERE id = :rid"),
-                {"vec": vec, "rid": p.id}
-            )
         return p
 
     # yoksa yeni oluştur
@@ -160,21 +152,39 @@ def add_paper_record(db: Session, rec: Dict[str, Any]) -> Optional[Paper]:
         db.add(PaperKeyword(paper_id=p.id, keyword_id=k.id))
 
     db.flush()
-
-    # embedding_v (pgvector) doldur
-    if emb_list:
-        vec = _cast_vector_literal(emb_list)
-        db.execute(
-            text("UPDATE papers SET embedding_v = CAST(:vec AS vector(768)) WHERE id = :rid"),
-            {"vec": vec, "rid": p.id}
-        )
-
     return p
+
+
+# ---- indirme akışı için yardımcılar -----------------------------------------
+
+def get_paper(db: Session, paper_id: int) -> Optional[Paper]:
+    return db.query(Paper).filter(Paper.id == paper_id).one_or_none()
+
+
+def set_pdf_path(db: Session, paper_id: int, pdf_path: Optional[str]) -> bool:
+    p = get_paper(db, paper_id)
+    if not p:
+        return False
+    p.pdf_path = pdf_path
+    db.add(p)
+    db.commit()
+    return True
+
+
+def iter_candidate_papers_for_download(db: Session, ids: Optional[Iterable[int]] = None) -> List[Paper]:
+    q = db.query(Paper)
+    if ids:
+        q = q.filter(Paper.id.in_(list(ids)))
+    # pdf_url'i olan ve henüz indirilmeyenler
+    q = q.filter(Paper.url_pdf.isnot(None)).filter(Paper.url_pdf != "")
+    q = q.filter((Paper.pdf_path.is_(None)) | (Paper.pdf_path == ""))
+    return q.order_by(Paper.id.desc()).all()
+
 
 # ---- read tarafı ------------------------------------------------------------
 
 def list_papers(db: Session, limit: int = 50):
-    rows = db.query(Paper).limit(limit).all()
+    rows = db.query(Paper).order_by(Paper.id.desc()).limit(limit).all()
     out = []
     for p in rows:
         out.append({
@@ -184,15 +194,20 @@ def list_papers(db: Session, limit: int = 50):
             "year": p.year,
             "source": p.source,
             "venue": p.venue,
-            "url_pdf": p.url_pdf
+            "url_pdf": p.url_pdf,
+            "pdf_path": p.pdf_path,
         })
     return out
+
 
 def all_papers_for_graph(db: Session):
     # küçük/orta veri için yeterli; büyürse sayfalama/filtre düşünülür
     return db.query(Paper).all()
 
+
 def fetch_all_embeddings(db: Session):
-    # (fallback için) Python tarafında benzerlik gerektiğinde kullanılır
+    """
+    Python tarafında benzerlik gerektiğinde kullanılabilir (pgvector yoksa).
+    """
     rows = db.query(Paper.id, Paper.embedding).all()
     return [(rid, emb) for rid, emb in rows if emb]

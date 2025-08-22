@@ -1,3 +1,4 @@
+# backend/app/ui.py
 from fastapi import APIRouter
 from fastapi.responses import HTMLResponse
 
@@ -5,14 +6,15 @@ router = APIRouter()
 
 HTML = """
 <!DOCTYPE html>
-<html>
+<html lang="tr">
 <head>
 <meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
 <title>MAM Literatür Bulucu</title>
 <style>
-  :root { --bg:#f8f9fa; --card:#fff; --txt:#343a40; --muted:#666; --line:#ddd; --pri:#007bff; --priH:#0056b3;}
+  :root { --bg:#f8f9fa; --card:#fff; --txt:#343a40; --muted:#666; --line:#ddd; --pri:#0b57d0; --priH:#0849b1;}
   * { box-sizing: border-box; }
-  body { font-family: system-ui, Arial; margin: 20px; background: var(--bg); color: var(--txt); }
+  body { font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; margin: 20px; background: var(--bg); color: var(--txt); }
 
   /* HEADER */
   header#brand{
@@ -28,8 +30,9 @@ HTML = """
   #brand h1{ font-size:1.4rem; margin:0; letter-spacing:.2px; }
   #brand .tag{ color:var(--muted); font-size:.9rem; margin-top:2px; }
 
+  /* TOP BAR */
   #top { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
-  input, button, select { padding: 8px; border-radius: 6px; border: 1px solid #ccc; }
+  input, button, select { padding: 8px; border-radius: 6px; border: 1px solid #ccc; background:#fff; }
   button { background-color: var(--pri); color: white; border: none; cursor: pointer; }
   button:hover { background-color: var(--priH); }
   button[disabled] { opacity: .6; cursor: not-allowed; }
@@ -38,13 +41,23 @@ HTML = """
   /* Görselleştirme alanı */
   #graph { width: 100%; min-height: 240px; border: 1px solid var(--line); margin-top: 16px; background: var(--card); border-radius: 6px; padding: 12px; }
 
+  /* Tablo */
   table { border-collapse: collapse; width: 100%; margin-top: 16px; background: var(--card); }
-  th, td { border: 1px solid var(--line); padding: 6px; text-align: left; }
+  th, td { border: 1px solid var(--line); padding: 6px; text-align: left; vertical-align: middle; }
   th { background: #f1f3f5; }
   tr:hover { background: #f8f9fa; }
   #pager { margin-top: 8px; display:flex; gap:8px; align-items:center; }
   #pager button { padding:6px 10px; }
-  #empty { padding: 16px; color: var(--muted); }
+  #empty { padding: 16px; color: var(--muted); display:none; }
+
+  /* seçim & indirme butonları */
+  th.sel, td.sel { width: 1%; text-align:center; }
+  th.action, td.action { width: 1%; white-space: nowrap; text-align: right; }
+  .btn-sm { padding:6px 10px; border-radius:6px; }
+  .btn-ghost { background:#eef3ff; color:#0b57d0; border:1px solid #cfe; }
+  .btn-ghost:hover { background:#dbe7ff; }
+  .btn-plain { background:#fff; color:#0b57d0; border:1px solid #cfe; }
+  .btn-plain:hover { background:#f7fbff; }
 
   /* Modal */
   .modal-backdrop { display:none; position:fixed; inset:0; background:rgba(0,0,0,.4); align-items:center; justify-content:center; z-index: 999; }
@@ -69,6 +82,8 @@ HTML = """
   .ctrl{display:flex;flex-direction:column;gap:4px}
   .ctrl label{font-size:.8rem;color:var(--muted);margin-left:2px}
 
+  /* İndirme araç çubuğu */
+  #dlbar { display:flex; gap:8px; align-items:center; justify-content:flex-end; margin-top:8px; flex-wrap: wrap; }
 </style>
 </head>
 <body>
@@ -82,26 +97,25 @@ HTML = """
     </div>
   </header>
 
+  <!-- TOP BAR -->
   <div id="top">
-  <input id="q" placeholder="Araştırma konusu" style="flex:1;">
-  <div class="ctrl" style="width:110px">
-    <label for="n">Maks. PDF</label>
-    <input id="n" type="number" value="8" min="2" max="50">
+    <input id="q" placeholder="Araştırma konusu" style="flex:1;">
+    <div class="ctrl" style="width:110px">
+      <label for="n">Maks. PDF</label>
+      <input id="n" type="number" value="8" min="2" max="50">
+    </div>
+    <button id="run">Ara & Topla</button>
+    <button id="exportCsv">Export CSV</button>
+    <button id="exportBib">Export BibTeX</button>
   </div>
-  <button id="run">Ara & Topla</button>
-  <button id="exportCsv">Export CSV</button>
-  <button id="exportBib">Export BibTeX</button>
-</div>
-
 
   <!-- Filtre barı -->
   <div id="filters" style="display:flex; gap:8px; flex-wrap:wrap; margin: 8px 0 4px;">
-    <input id="fq" placeholder="Başlıkta ara">
-    <input id="fauthor" placeholder="Yazar">
-    <input id="fsource" placeholder="Kaynak (örn: OpenAlex)">
+    <input id="fq" placeholder="Başlıkta ara" title="Başlıkta arayın">
+    <input id="fauthor" placeholder="Yazar" title="Yazar adında arayın">
+    <input id="fsource" placeholder="Kaynak (örn: OpenAlex)" title="Kaynak filtreleyin">
     <input id="fy1" type="number" placeholder="Yıl ≥" style="width:110px;">
     <input id="fy2" type="number" placeholder="Yıl ≤" style="width:110px;">
-    <!-- SIRALAMA -->
     <select id="fsort" title="Sırala">
       <option value="year_desc" selected>Yıl (Azalan)</option>
       <option value="year_asc">Yıl (Artan)</option>
@@ -114,46 +128,61 @@ HTML = """
 
   <!-- Görselleştirme kontrolleri -->
   <div id="vizbar" style="display:flex; gap:8px; flex-wrap:wrap; margin: 8px 0;">
-  <div class="ctrl" style="min-width:220px">
-    <label for="vizType">Görselleştirme</label>
-    <select id="vizType" title="Görselleştirme türü">
-      <option value="cloud" selected>Anahtar Kelime Bulutu</option>
-      <option value="bar">Top Anahtar Kelimeler (Bar)</option>
-    </select>
+    <div class="ctrl" style="min-width:220px">
+      <label for="vizType">Görselleştirme</label>
+      <select id="vizType" title="Görselleştirme türü">
+        <option value="cloud" selected>Anahtar Kelime Bulutu</option>
+        <option value="bar">Top Anahtar Kelimeler (Bar)</option>
+      </select>
+    </div>
+    <div class="ctrl" style="width:110px">
+      <label for="kwTopN">Top N</label>
+      <input id="kwTopN" type="number" value="50" min="10" max="500" title="Gösterilecek en çok geçen N kelime">
+    </div>
+    <div class="ctrl" style="width:140px">
+      <label for="kwMinCount">Min Frekans</label>
+      <input id="kwMinCount" type="number" value="2" min="1" title="Bir kelimenin dahil olması için gereken minimum makale sayısı">
+    </div>
+    <div class="ctrl" style="align-self:flex-end">
+      <label style="visibility:hidden">.</label>
+      <button id="btnStats">Görüntüle</button>
+    </div>
   </div>
-  <div class="ctrl" style="width:110px">
-    <label for="kwTopN">Top N</label>
-    <input id="kwTopN" type="number" value="50" min="10" max="500" title="Gösterilecek en çok geçen N kelime">
-  </div>
-  <div class="ctrl" style="width:140px">
-    <label for="kwMinCount">Min Frekans</label>
-    <input id="kwMinCount" type="number" value="2" min="1" title="Bir kelimenin dahil olması için gereken minimum makale sayısı">
-  </div>
-  <div class="ctrl" style="align-self:flex-end">
-    <label style="visibility:hidden"> </label>
-    <button id="btnStats">Görüntüle</button>
-  </div>
-</div>
-
 
   <div id="status"></div>
-
   <div id="graph"></div>
 
+  <!-- Liste üstü indirme araç çubuğu -->
+  <div id="dlbar">
+    <button id="selectAllPage" class="btn-sm btn-plain">Tümünü Seç (Sayfa)</button>
+    <button id="clearSel" class="btn-sm btn-plain">Seçimi Temizle</button>
+    <button id="dlSelectedBrowser" class="btn-sm btn-ghost">Seçilenleri İndir (Tarayıcı)</button>
+    <button id="dlSelectedBg" class="btn-sm btn-ghost">Seçilenleri Arkaplanda İndir</button>
+    <button id="dlAll" class="btn-sm btn-ghost">Tümünü İndir (Arkaplan)</button>
+    <a id="zipLink" class="btn-sm btn-ghost" href="/export/pdfs.zip" target="_blank" rel="noopener">İndirilenleri ZIP</a>
+  </div>
+
   <h3>📄 Makale Listesi</h3>
-  <table id="tbl">
+  <table id="tbl" aria-label="Makale listesi">
     <thead>
-      <tr><th>Başlık</th><th>Yazarlar</th><th>Yıl</th><th>Kaynak</th><th>PDF</th></tr>
+      <tr>
+        <th class="sel">Seç</th>
+        <th>Başlık</th>
+        <th>Yazarlar</th>
+        <th>Yıl</th>
+        <th>Kaynak</th>
+        <th class="action">İndir</th>
+      </tr>
     </thead>
     <tbody></tbody>
   </table>
-  <div id="empty" style="display:none;">Hiç kayıt bulunamadı. Filtreleri temizlemeyi deneyin.</div>
+  <div id="empty">Hiç kayıt bulunamadı. Filtreleri temizlemeyi deneyin.</div>
   <div id="pager"></div>
 
   <!-- Modal -->
   <div id="modalWrap" class="modal-backdrop">
     <div class="modal" role="dialog" aria-modal="true">
-      <button class="close-btn" id="closeModal">Kapat</button>
+      <button class="close-btn" id="closeModal" aria-label="Kapat">Kapat</button>
       <h3 id="mTitle"></h3>
       <div class="muted" id="mMeta"></div>
       <div class="sec" id="mLinks"></div>
@@ -174,17 +203,19 @@ HTML = """
 <script>
   let gPage = 1, gPageSize = 20;
   let fetching = false;
+  const selected = new Set(); // seçili id'ler (sayfalar arası korunur)
 
+  const $ = (id)=>document.getElementById(id);
   function qs(params){ const p = new URLSearchParams(params); return p.toString(); }
 
   function readFilters(){
     return {
-      q: document.getElementById('fq').value.trim(),
-      author: document.getElementById('fauthor').value.trim(),
-      source: document.getElementById('fsource').value.trim(),
-      year_from: document.getElementById('fy1').value,
-      year_to: document.getElementById('fy2').value,
-      sort: document.getElementById('fsort').value
+      q: $('fq').value.trim(),
+      author: $('fauthor').value.trim(),
+      source: $('fsource').value.trim(),
+      year_from: $('fy1').value,
+      year_to: $('fy2').value,
+      sort: $('fsort').value
     };
   }
 
@@ -204,58 +235,26 @@ HTML = """
     return params;
   }
 
-  // ---------- LISTE ----------
-  async function refreshList(page=1){
-    gPage = page;
-    const params = applyToParams({page:gPage, page_size:gPageSize});
-    const res = await fetch('/papers?' + qs(params));
-    const data = await res.json();
-    const items = data.items || [];
-    const tb = document.querySelector('#tbl tbody');
-    tb.innerHTML = '';
-    document.getElementById('empty').style.display = items.length ? 'none' : 'block';
-    items.forEach(p=>{
-      const tr = document.createElement('tr');
-      tr.innerHTML = `
-        <td>${p.title || ''}</td>
-        <td>${(p.authors || []).join(', ')}</td>
-        <td>${p.year || ''}</td>
-        <td>${p.source || ''}</td>
-        <td>${p.url_pdf ? `<a href="${p.url_pdf}" target="_blank" rel="noopener">PDF</a>` : ''}</td>
-      `;
-      tr.style.cursor = 'pointer';
-      tr.title = 'Detay ve benzerleri görmek için tıklayın';
-      tr.addEventListener('click', ()=> openDetails(p.db_id));
-      tb.appendChild(tr);
-    });
-    renderPager(data.total || 0, data.page || 1, data.page_size || gPageSize);
+  function downloadViaProxy(paperId){
+    const a = document.createElement('a');
+    a.href = `/pdf/proxy/${paperId}`;
+    a.download = '';
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
   }
 
-  function renderPager(total, page, pageSize){
-    const pager = document.getElementById('pager');
-    const pageCount = Math.max(1, Math.ceil(total / pageSize));
-    pager.innerHTML = '';
-    const info = document.createElement('span');
-    info.textContent = `Toplam ${total} kayıt — Sayfa ${page}/${pageCount}`;
-    const prev = document.createElement('button');
-    prev.textContent = 'Önceki'; prev.disabled = page <= 1; prev.onclick = ()=> refreshList(page - 1);
-    const next = document.createElement('button');
-    next.textContent = 'Sonraki'; next.disabled = page >= pageCount; next.onclick = ()=> refreshList(page + 1);
-    pager.append(info, prev, next);
-
-    window.onkeydown = (e)=>{
-      if (e.key === 'ArrowLeft' && page > 1) { refreshList(page-1); }
-      if (e.key === 'ArrowRight' && page < pageCount) { refreshList(page+1); }
-    };
+  function showEmptyIfNeeded(items){
+    $('empty').style.display = items.length ? 'none' : 'block';
   }
 
   // ---------- MODAL ----------
   function showModal(show){
-    const el = document.getElementById('modalWrap');
+    const el = $('modalWrap');
     el.style.display = show ? 'flex' : 'none';
     document.body.style.overflow = show ? 'hidden' : 'auto';
   }
-  document.getElementById('closeModal').onclick = ()=> showModal(false);
+  $('closeModal').onclick = ()=> showModal(false);
   window.addEventListener('keydown', (e)=>{ if(e.key === 'Escape') showModal(false); });
 
   async function openDetails(dbId){
@@ -263,32 +262,33 @@ HTML = """
     const d = await res.json();
     if(d.error){ alert('Kayıt bulunamadı'); return; }
 
-    document.getElementById('mTitle').textContent = d.title || '(Başlık yok)';
+    $('mTitle').textContent = d.title || '(Başlık yok)';
     const meta = [];
     if((d.authors||[]).length) meta.push(d.authors.join(', '));
     if(d.year) meta.push(d.year);
     if(d.venue) meta.push(d.venue);
     if(d.source) meta.push(d.source);
-    document.getElementById('mMeta').textContent = meta.join(' • ');
+    $('mMeta').textContent = meta.join(' • ');
 
     let links = '';
     if(d.doi){ links += `<a href="https://doi.org/${d.doi}" target="_blank" rel="noopener">DOI</a> `; }
-    if(d.url_pdf){ links += `<a href="${d.url_pdf}" target="_blank" rel="noopener">PDF</a> `; }
-    document.getElementById('mLinks').innerHTML = links || '<span class="muted">Bağlantı yok</span>';
+    if(d.url_pdf){ links += `<a href="${d.url_pdf}" target="_blank" rel="noopener">Kaynak PDF</a> `; }
+    links += ` <a href="/pdf/proxy/${dbId}">İndir (proxy)</a>`;
+    $('mLinks').innerHTML = links || '<span class="muted">Bağlantı yok</span>';
 
-    document.getElementById('mSummary').textContent = d.summary || '(özet yok)';
-    document.getElementById('mAbstract').textContent = d.abstract || '(abstract yok)';
+    $('mSummary').textContent = d.summary || '(özet yok)';
+    $('mAbstract').textContent = d.abstract || '(abstract yok)';
 
-    const kw = document.getElementById('mKeywords'); kw.innerHTML = '';
+    const kw = $('mKeywords'); kw.innerHTML = '';
     (d.keywords||[]).forEach(k=>{
       const span = document.createElement('span'); span.className='chip'; span.textContent=k; kw.appendChild(span);
     });
 
-    // Benzer makaleler — modal içi
+    // Benzerler
     const simRes = await fetch(`/similar?db_id=${dbId}&topk=5`);
     const sim = await simRes.json();
-    const sb = document.getElementById('mSimBody'); sb.innerHTML = '';
-    const empty = document.getElementById('mSimEmpty');
+    const sb = $('mSimBody'); sb.innerHTML = '';
+    const empty = $('mSimEmpty');
     const arr = sim.neighbors || [];
     if(!arr.length){
       empty.style.display = 'block';
@@ -320,8 +320,8 @@ HTML = """
     if (f.source) p.set('source', f.source);
     if (f.year_from) p.set('min_year', f.year_from);
     if (f.year_to) p.set('max_year', f.year_to);
-    p.set('limit', document.getElementById('kwTopN').value || 50);
-    p.set('min_count', document.getElementById('kwMinCount').value || 2);
+    p.set('limit', $('kwTopN').value || 50);
+    p.set('min_count', $('kwMinCount').value || 2);
     return p.toString();
   }
 
@@ -342,13 +342,13 @@ HTML = """
   }
 
   function renderCloud(s){
-    const graph = document.getElementById('graph');
+    const graph = $('graph');
     graph.innerHTML = `<div id="kpis"></div><div class="cloud" id="cloud"></div>`;
-    renderKPIs(document.getElementById('kpis'), s);
+    renderKPIs($('kpis'), s);
 
     const max = Math.max(...s.keyword_stats.map(d=>d.count), 1);
     const min = Math.min(...s.keyword_stats.map(d=>d.count), max);
-    const cloud = document.getElementById('cloud');
+    const cloud = $('cloud');
 
     s.keyword_stats.forEach(d=>{
       const size = Math.round(12 + (d.count - min)/(max - min || 1) * 30); // 12–42px
@@ -362,11 +362,11 @@ HTML = """
   }
 
   function renderBars(s){
-    const graph = document.getElementById('graph');
+    const graph = $('graph');
     graph.innerHTML = `<div id="kpis"></div><div id="bars" style="display:grid;gap:8px"></div>`;
-    renderKPIs(document.getElementById('kpis'), s);
+    renderKPIs($('kpis'), s);
     const max = Math.max(...s.keyword_stats.map(d=>d.count), 1);
-    const bars = document.getElementById('bars');
+    const bars = $('bars');
 
     s.keyword_stats.forEach(d=>{
       const row = document.createElement('div');
@@ -382,32 +382,110 @@ HTML = """
   async function renderViz(){
     try{
       const s = await loadKeywordStats();
-      const t = document.getElementById('vizType').value;
+      const t = $('vizType').value;
       if (t==='bar') renderBars(s);
-      else renderCloud(s); // default cloud
+      else renderCloud(s);
     }catch(err){
-      document.getElementById('graph').innerHTML = '<div class="muted">İstatistik alınamadı.</div>';
+      $('graph').innerHTML = '<div class="muted">İstatistik alınamadı.</div>';
       console.error(err);
     }
+  }
+
+  // ---------- LİSTE ----------
+  async function refreshList(page=1){
+    gPage = page;
+    const params = applyToParams({page:gPage, page_size:gPageSize});
+    const res = await fetch('/papers?' + qs(params));
+    const data = await res.json();
+    const items = data.items || [];
+    const tb = document.querySelector('#tbl tbody');
+    tb.innerHTML = '';
+    showEmptyIfNeeded(items);
+
+    items.forEach(p=>{
+      const tr = document.createElement('tr');
+      tr.dataset.id = p.db_id;
+
+      // checkbox
+      const tdSel = document.createElement('td'); tdSel.className = 'sel';
+      const cb = document.createElement('input'); cb.type = 'checkbox'; cb.checked = selected.has(p.db_id);
+      cb.dataset.id = p.db_id;
+      cb.addEventListener('click', (e)=>{ e.stopPropagation(); if(cb.checked) selected.add(p.db_id); else selected.delete(p.db_id); });
+      tdSel.appendChild(cb);
+
+      // hücreler
+      const tdTitle = document.createElement('td'); tdTitle.textContent = p.title || '';
+      const tdAuthors = document.createElement('td'); tdAuthors.textContent = (p.authors || []).join(', ');
+      const tdYear = document.createElement('td'); tdYear.textContent = p.year || '';
+      const tdSource = document.createElement('td'); tdSource.textContent = p.source || '';
+
+      // aksiyonlar
+      const tdAction = document.createElement('td'); tdAction.className = 'action';
+      const btnDl = document.createElement('button');
+      btnDl.className = 'btn-sm'; btnDl.textContent = '📥 İndir';
+      btnDl.addEventListener('click', (e)=>{ e.stopPropagation(); downloadViaProxy(p.db_id); });
+
+      const btnSave = document.createElement('button');
+      btnSave.className = 'btn-sm btn-plain'; btnSave.textContent = '💾 Sunucuya Kaydet';
+      btnSave.title = 'Sunucuda dosyayı sakla (zip için kullanışlı)';
+      btnSave.addEventListener('click', async (e)=>{
+        e.stopPropagation(); btnSave.disabled = true; btnSave.textContent = 'Kaydediliyor...';
+        try{
+          const r = await fetch(`/download/${p.db_id}`, { method:'POST' });
+          if(!r.ok){ const j = await r.json().catch(()=>({})); throw new Error(j.detail || 'İndirme hatası'); }
+          btnSave.textContent = 'Kaydedildi';
+        }catch(err){
+          btnSave.disabled = false; btnSave.textContent = '💾 Sunucuya Kaydet';
+          $('status').innerText = String(err);
+        }
+      });
+
+      tdAction.append(btnDl, document.createTextNode(' '), btnSave);
+
+      tr.append(tdSel, tdTitle, tdAuthors, tdYear, tdSource, tdAction);
+      tr.style.cursor = 'pointer';
+      tr.title = 'Detay ve benzerleri görmek için tıklayın';
+      tr.addEventListener('click', ()=> openDetails(p.db_id));
+      tb.appendChild(tr);
+    });
+
+    renderPager(data.total || 0, data.page || 1, data.page_size || gPageSize);
+  }
+
+  function renderPager(total, page, pageSize){
+    const pager = $('pager');
+    const pageCount = Math.max(1, Math.ceil(total / pageSize));
+    pager.innerHTML = '';
+    const info = document.createElement('span');
+    info.textContent = `Toplam ${total} kayıt — Sayfa ${page}/${pageCount}`;
+    const prev = document.createElement('button');
+    prev.textContent = 'Önceki'; prev.disabled = page <= 1; prev.onclick = ()=> refreshList(page - 1);
+    const next = document.createElement('button');
+    next.textContent = 'Sonraki'; next.disabled = page >= pageCount; next.onclick = ()=> refreshList(page + 1);
+    pager.append(info, prev, next);
+
+    window.onkeydown = (e)=>{
+      if (e.key === 'ArrowLeft' && page > 1) { refreshList(page-1); }
+      if (e.key === 'ArrowRight' && page < pageCount) { refreshList(page+1); }
+    };
   }
 
   // ---------- STATE/BUTTONS ----------
   function setBusy(busy){
     fetching = busy;
-    document.getElementById('run').disabled = busy;
-    document.getElementById('status').innerText = busy ? 'Aranıyor, PDF indiriliyor...' : '';
+    $('run').disabled = busy;
+    $('status').innerText = busy ? 'Aranıyor, PDF indiriliyor...' : '';
   }
 
-  document.getElementById('run').onclick = async ()=>{
-    const topic = document.getElementById('q').value.trim();
-    const n = parseInt(document.getElementById('n').value || '8');
+  $('run').onclick = async ()=>{
+    const topic = $('q').value.trim();
+    const n = parseInt(($('n').value || '8'), 10);
     if(!topic || fetching) return;
 
-    // görünümü temizle
     document.querySelector('#tbl tbody').innerHTML = '';
-    document.getElementById('empty').style.display = 'none';
-    document.getElementById('graph').innerHTML = '';
-    document.getElementById('status').innerText = '';
+    $('empty').style.display = 'none';
+    $('graph').innerHTML = '';
+    $('status').innerText = '';
 
     setBusy(true);
     try{
@@ -418,49 +496,99 @@ HTML = """
       });
       await refreshList(1);
       await renderViz();
-      document.getElementById('status').innerText = 'Tamamlandı.';
+      $('status').innerText = 'Tamamlandı.';
     }catch(e){
-      document.getElementById('status').innerText = 'Hata: ' + e;
+      $('status').innerText = 'Hata: ' + e;
     } finally {
       setBusy(false);
     }
   };
 
-  document.getElementById('q').addEventListener('keydown', (e)=>{ if(e.key==='Enter') document.getElementById('run').click(); });
+  $('q').addEventListener('keydown', (e)=>{ if(e.key==='Enter') $('run').click(); });
   ['fq','fauthor','fsource','fy1','fy2'].forEach(id=>{
-    document.getElementById(id).addEventListener('keydown', (e)=>{
-      if(e.key==='Enter'){ document.getElementById('apply').click(); }
-    });
+    $(id).addEventListener('keydown', (e)=>{ if(e.key==='Enter'){ $('apply').click(); }});
   });
 
-  document.getElementById('apply').onclick = ()=>{ refreshList(1); renderViz(); };
-  document.getElementById('reset').onclick = ()=>{
-    ['fq','fauthor','fsource','fy1','fy2'].forEach(id=> document.getElementById(id).value = '');
-    document.getElementById('fsort').value = 'year_desc';
+  $('apply').onclick = ()=>{ refreshList(1); renderViz(); };
+  $('reset').onclick = ()=>{
+    ['fq','fauthor','fsource','fy1','fy2'].forEach(id=> $(id).value = '');
+    $('fsort').value = 'year_desc';
     refreshList(1);
     renderViz();
   };
-  document.getElementById('fsort').addEventListener('change', ()=>{ refreshList(1); renderViz(); });
+  $('fsort').addEventListener('change', ()=>{ refreshList(1); renderViz(); });
 
   function buildExportUrl(base){
     const params = applyToParams({});
     const q = new URLSearchParams(params).toString();
     return q ? `${base}?${q}` : base;
   }
-  document.getElementById('exportCsv').onclick = ()=> window.location = buildExportUrl('/export/csv');
-  document.getElementById('exportBib').onclick = ()=> window.location = buildExportUrl('/export/bibtex');
+  $('exportCsv').onclick = ()=> window.location = buildExportUrl('/export/csv');
+  $('exportBib').onclick = ()=> window.location = buildExportUrl('/export/bibtex');
+
+  // Liste üstü indirme araç çubuğu
+  $('dlAll').onclick = async ()=>{
+    try{
+      const r = await fetch('/download/batch', { method:'POST' });
+      const j = await r.json().catch(()=> ({}));
+      if(r.ok){
+        $('status').innerText = `Arkaplana alındı. Sıra: ${j.queued||0}`;
+      }else{
+        $('status').innerText = j.detail || 'Batch indirme hatası';
+      }
+    }catch(e){
+      $('status').innerText = 'Batch indirme hatası';
+    }
+  };
+
+  $('selectAllPage').onclick = ()=>{
+    document.querySelectorAll('#tbl tbody tr').forEach(tr=>{
+      const id = Number(tr.dataset.id);
+      const cb = tr.querySelector('input[type=checkbox]');
+      if (cb) { cb.checked = true; selected.add(id); }
+    });
+  };
+  $('clearSel').onclick = ()=>{
+    selected.clear();
+    document.querySelectorAll('#tbl tbody input[type=checkbox]').forEach(cb=> cb.checked = false);
+  };
+
+  $('dlSelectedBrowser').onclick = async ()=>{
+    if(!selected.size){ $('status').innerText = 'Seçim yok.'; return; }
+    $('status').innerText = 'Seçilenler indiriliyor (tarayıcı)...';
+    const ids = Array.from(selected);
+    for (let i=0;i<ids.length;i++){
+      downloadViaProxy(ids[i]);
+      await new Promise(r=> setTimeout(r, 250));
+    }
+    $('status').innerText = 'Seçilenler indirildi (başlatıldı).';
+  };
+
+  $('dlSelectedBg').onclick = async ()=>{
+    if(!selected.size){ $('status').innerText = 'Seçim yok.'; return; }
+    const ids = Array.from(selected).join(',');
+    try{
+      const r = await fetch('/download/batch?'+new URLSearchParams({ids}), { method:'POST' });
+      const j = await r.json().catch(()=> ({}));
+      if(r.ok){
+        $('status').innerText = `Arkaplana alındı. Sıra: ${j.queued||0}`;
+      }else{
+        $('status').innerText = j.detail || 'Batch indirme hatası';
+      }
+    }catch(e){
+      $('status').innerText = 'Batch indirme hatası';
+    }
+  };
 
   // Görselleştirme butonları
-  document.getElementById('btnStats').onclick = renderViz;
-  document.getElementById('vizType').addEventListener('change', renderViz);
-  document.getElementById('kwTopN').addEventListener('change', renderViz);
-  document.getElementById('kwMinCount').addEventListener('change', renderViz);
+  $('btnStats').onclick = renderViz;
+  $('vizType').addEventListener('change', renderViz);
+  $('kwTopN').addEventListener('change', renderViz);
+  $('kwMinCount').addEventListener('change', renderViz);
 
   // İlk yükleme
-  refreshList(1);
-  renderViz();
+  (async function firstLoad(){ await refreshList(1); await renderViz(); })();
 </script>
-
 </body>
 </html>
 """
