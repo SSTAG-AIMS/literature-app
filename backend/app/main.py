@@ -9,10 +9,11 @@ import unicodedata
 import zipfile
 import asyncio
 from pathlib import Path
-from typing import List, Optional, Union
+from typing import List, Optional, Union, Any, Dict
 from urllib.parse import quote
 
 import httpx
+import fitz  # PyMuPDF
 from fastapi import APIRouter, BackgroundTasks, Depends, FastAPI, HTTPException, Query
 from fastapi.responses import RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -31,12 +32,16 @@ from .crud import (
 from .db import SessionLocal, get_db
 from .llm import embed, expand_queries, keywords, sanitize_keywords, sanitize_summary, summarize
 from .models import Author, Paper, PaperAuthor
-from .pdfutil import download_pdf, download_pdf_to_dir, extract_text
+# Not: Arama sırasında artık diske yazmayacağız; sadece explicit indirme için kullanacağız
+from .pdfutil import download_pdf_to_dir
 from .sources import search_openalex_async
 from .sources_arxiv import search_arxiv_async
 from .sources_crossref import search_crossref_async
 from .sources_dergipark import search_dergipark_async
 from .ui import router as ui_router
+
+# === Abstract normalizasyonu ===
+import html
 
 app = FastAPI(title="Literature Discovery (PostgreSQL)")
 
@@ -49,6 +54,128 @@ app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 # UI router
 app.include_router(ui_router)
 
+# -------------------- Abstract Normalizasyonu (OpenAlex/Crossref/arXiv/DergiPark) --------------------
+_TAG_RE = re.compile(r"<[^>]+>")
+_WS_RE = re.compile(r"\s+")
+
+def _strip_html(s: str) -> str:
+    if not s:
+        return ""
+    s = _TAG_RE.sub(" ", s)          # JATS/XML/HTML etiketlerini sök
+    s = html.unescape(s)              # HTML entity çöz
+    s = _WS_RE.sub(" ", s).strip()    # whitespace normalize
+    return s
+
+def _meaningful(s: str, minlen: int = 20) -> str:
+    s = (s or "").strip()
+    return s if len(s) >= minlen else ""
+
+def _openalex_decode_abstract(inv_idx: Dict[str, Any]) -> str:
+    try:
+        pos2tok: Dict[int, str] = {}
+        for tok, poss in (inv_idx or {}).items():
+            for p in poss or []:
+                pos2tok[int(p)] = tok
+        if not pos2tok:
+            return ""
+        out = " ".join(pos2tok[i] for i in range(min(pos2tok), max(pos2tok)+1) if i in pos2tok)
+        return _strip_html(out)
+    except Exception:
+        return ""
+
+def _pick_abstract(rec: Dict[str, Any]) -> str:
+    # 0) Halihazırda gelen abstract
+    cur = _meaningful(_strip_html(rec.get("abstract", "")))
+    if cur:
+        return cur
+
+    source = (rec.get("source") or "").lower()
+
+    # 1) OpenAlex inverted index
+    inv = rec.get("abstract_inverted_index") or rec.get("openalex_abstract_inverted_index")
+    if isinstance(inv, dict):
+        out = _meaningful(_openalex_decode_abstract(inv))
+        if out:
+            return out
+
+    # 2) arXiv
+    arxiv_sum = rec.get("summary") or rec.get("arxiv_summary")
+    if ("arxiv" in source) or arxiv_sum:
+        out = _meaningful(_strip_html(arxiv_sum or ""))
+        if out:
+            return out
+
+    # 3) DergiPark
+    dp_cand = (
+        rec.get("abstract_en")
+        or rec.get("en_abstract")
+        or rec.get("abstract_tr")
+        or rec.get("tr_abstract")
+        or rec.get("abstract")
+        or rec.get("oz")
+        or rec.get("ozet")
+        or rec.get("description")
+    )
+    if ("dergipark" in source) or dp_cand:
+        out = _meaningful(_strip_html(dp_cand or ""))
+        if out:
+            return out
+
+    # 4) Crossref (JATS/XML stringi)
+    if ("crossref" in source) and rec.get("abstract"):
+        out = _meaningful(_strip_html(rec["abstract"]))
+        if out:
+            return out
+
+    # 5) Genel fallback
+    for key in ("summary", "description"):
+        if rec.get(key):
+            out = _meaningful(_strip_html(rec[key]))
+            if out:
+                return out
+
+    return ""
+
+# -------------------- PDF'yi bellekte açıp metin çıkarma (disk'e kaydetmeden) --------------------
+async def _fetch_pdf_text(url: str, timeout_s: int = 60) -> str:
+    """
+    PDF'yi indirir ama diske yazmaz; bellekte açıp metni döndürür.
+    Başarısızlıkta "" döner.
+    """
+    if not url:
+        return ""
+    try:
+        async with httpx.AsyncClient(follow_redirects=True, timeout=timeout_s) as client:
+            r = await client.get(url)
+    except Exception:
+        return ""
+
+    if r.status_code != 200 or not r.content:
+        return ""
+
+    ctype = (r.headers.get("content-type") or "").lower()
+    looks_like_pdf = (r.content[:4] == b"%PDF") or ("pdf" in ctype)
+    if not looks_like_pdf:
+        # Bazı sunucular content-type'ı yanlış döndürür; yine de dene
+        pass
+
+    try:
+        with fitz.open(stream=r.content, filetype="pdf") as doc:
+            if doc.is_encrypted:
+                try:
+                    doc.authenticate("")
+                except Exception:
+                    return ""
+            chunks = []
+            for page in doc:
+                try:
+                    chunks.append(page.get_text())
+                except Exception:
+                    continue
+            return "\n".join(chunks)
+    except Exception:
+        return ""
+
 # -------------------- Health --------------------
 @app.get("/health")
 def health():
@@ -59,18 +186,15 @@ def health():
         "static_dir": str(STATIC_DIR),
     }
 
-
 # -------------------- Search & Ingest --------------------
 class SearchRunIn(BaseModel):
     topic: str
     max_results: int = 20
 
-
 @app.post("/search/run")
 async def search_run(inp: SearchRunIn, db: Session = Depends(get_db)):
     qs: List[str] = expand_queries(inp.topic)
 
-    # Tüm kaynaklar otomatik
     registered = [
         ("openalex", search_openalex_async),
         ("dergipark", search_dergipark_async),
@@ -78,7 +202,6 @@ async def search_run(inp: SearchRunIn, db: Session = Depends(get_db)):
         ("crossref", search_crossref_async),
     ]
 
-    # Alt-sorgu x kaynak başına limit
     denom = max(1, len(qs) * max(1, len(registered)))
     per_task = max(2, inp.max_results // denom or 2)
 
@@ -99,19 +222,20 @@ async def search_run(inp: SearchRunIn, db: Session = Depends(get_db)):
     processed = 0
     for rec in candidates:
         try:
-            # Şimdilik PDF zorunlu; PDF yoksa atla
+            # PDF URL yoksa atla (ama diske kaydetme!)
             if not rec.get("url_pdf"):
                 continue
 
-            pdf = await download_pdf(rec["url_pdf"])
-            if not pdf:
-                continue
-            try:
-                text_content = extract_text(pdf)
-            except Exception:
-                text_content = rec.get("abstract", "") or rec["title"]
+            # ---- ABSTRACT NORMALİZASYONU ----
+            new_abs = _pick_abstract(rec)
+            if new_abs:
+                rec["abstract"] = new_abs
 
-            base = text_content or rec.get("abstract", "") or rec["title"]
+            # ---- PDF metnini bellekten oku ----
+            text_content = await _fetch_pdf_text(rec["url_pdf"])
+
+            # Bellekten metin çıkmazsa abstract / başlıkla devam et
+            base = text_content or rec.get("abstract", "") or rec.get("title") or ""
 
             # ---- LLM ----
             s = summarize(base)
@@ -135,7 +259,6 @@ async def search_run(inp: SearchRunIn, db: Session = Depends(get_db)):
             print("PIPELINE/DB ERROR:", e)
 
     return {"topic": inp.topic, "queries": qs, "processed": processed}
-
 
 # -------------------- Papers (filters + pagination + sorting) --------------------
 @app.get("/papers")
@@ -169,7 +292,6 @@ def papers(
 
     total = db.execute(stmt.with_only_columns(func.count(func.distinct(Paper.id)))).scalar_one()
 
-    # ---- SIRALAMA ----
     sort_by = sort_by if sort_by in ("year", "ingested") else "year"
     sort_dir = sort_dir if sort_dir in ("asc", "desc") else "desc"
 
@@ -202,7 +324,6 @@ def papers(
 
     return {"items": items, "page": page, "page_size": page_size, "total": int(total)}
 
-
 # -------------------- Paper Detail (for modal) --------------------
 @app.get("/paper/{paper_id}")
 def paper_detail(paper_id: int, db: Session = Depends(get_db)):
@@ -228,7 +349,6 @@ def paper_detail(paper_id: int, db: Session = Depends(get_db)):
         "keywords": safe_keywords,
         "pdf_path": getattr(p, "pdf_path", None),
     }
-
 
 # -------------------- CSV Export (sorting destekli) --------------------
 @app.get("/export/csv")
@@ -294,7 +414,6 @@ def export_csv(
     return StreamingResponse(
         buf, media_type="text/csv", headers={"Content-Disposition": 'attachment; filename="papers.csv"'}
     )
-
 
 # -------------------- BibTeX Export (sorting destekli) --------------------
 @app.get("/export/bibtex")
@@ -374,39 +493,25 @@ def export_bibtex(
         buf, media_type="application/x-bibtex", headers={"Content-Disposition": 'attachment; filename="papers.bib"'}
     )
 
-
 # -------------------- Client-side indirme için: redirect & proxy --------------------
 def _safe_http_header_value(s: str) -> str:
-    """CR/LF ve ASCII dışı kontrol karakterlerini at."""
     return "".join(ch for ch in s if 32 <= ord(ch) <= 126)
 
-
 def _safe_ascii_filename(base: str, fallback: str) -> str:
-    """ASCII’ye normalize edilmiş, güvenli ve makul uzunlukta dosya adı üret."""
     ascii_ = unicodedata.normalize("NFKD", base).encode("ascii", "ignore").decode("ascii")
     ascii_ = re.sub(r"[^A-Za-z0-9._\- ]+", "_", ascii_)
     ascii_ = ascii_.strip(" ._-") or fallback
     return (ascii_[:120] or fallback) + ".pdf"
 
-
 @app.get("/pdf/redirect/{paper_id}")
 def pdf_redirect(paper_id: int, db: Session = Depends(get_db)):
-    """
-    PDF'i sunucuda tutmadan gerçek kaynağına 307 redirect eder.
-    Tarayıcı bazı durumlarda sekmede açabilir; garantili indirme için /pdf/proxy kullan.
-    """
     p = db.query(Paper).filter(Paper.id == paper_id).one_or_none()
     if not p or not p.url_pdf:
         raise HTTPException(status_code=404, detail="PDF URL not found")
     return RedirectResponse(url=p.url_pdf, status_code=307)
 
-
 @app.get("/pdf/proxy/{paper_id}")
 async def pdf_proxy(paper_id: int, db: Session = Depends(get_db)):
-    """
-    Kaynak PDF'i sunucu üstünden akıtır; Content-Disposition ile 'attachment' zorlar.
-    UTF-8 başlık uyumlu olacak şekilde Content-Disposition üretir.
-    """
     p = db.query(Paper).filter(Paper.id == paper_id).one_or_none()
     if not p or not p.url_pdf:
         raise HTTPException(status_code=404, detail="PDF URL not found")
@@ -421,18 +526,13 @@ async def pdf_proxy(paper_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=502, detail=f"Upstream responded {r.status_code}")
 
     ctype = (r.headers.get("content-type") or "").lower()
-    # Basit PDF doğrulaması (hem sihirli baytlar hem de content-type)
     if not (r.content[:5] == b"%PDF-" or "pdf" in ctype):
         raise HTTPException(status_code=502, detail="Not a PDF")
 
-    # --- Güvenli Content-Disposition oluştur ---
     raw_title = (p.title or f"paper_{p.id}").replace("/", "_").replace("\\", "_").strip()
-    raw_base = f"{p.id}_{raw_title}"[:200]  # çok uzunsa kısalt
+    raw_base = f"{p.id}_{raw_title}"[:200]
 
-    # ASCII (Latin-1 uyumlu) fallback ismi
     ascii_name = _safe_ascii_filename(raw_base, f"paper_{p.id}")
-
-    # Gerçek UTF-8 ismi (URL-encode)
     utf8_name = quote(raw_base + ".pdf", safe="")
 
     content_disposition = _safe_http_header_value(
@@ -445,17 +545,11 @@ async def pdf_proxy(paper_id: int, db: Session = Depends(get_db)):
         "Cache-Control": "no-store",
     }
 
-    # BytesIO üzerinden tüm içeriği döndürüyoruz (streaming alternatifi de kullanılabilir)
     return StreamingResponse(io.BytesIO(r.content), headers=headers, media_type="application/pdf")
-
 
 # -------------------- Download: tekil / toplu / zip --------------------
 @app.post("/download/{paper_id}")
 async def download_single_pdf(paper_id: int, db: Session = Depends(get_db)):
-    """
-    Tek makale PDF indir. Başarılıysa papers.pdf_path güncellenir.
-    (UI bunu kullanmıyorsa bile API olarak bırakıyoruz.)
-    """
     paper = get_paper(db, paper_id)
     if not paper:
         raise HTTPException(status_code=404, detail="Paper not found")
@@ -471,11 +565,7 @@ async def download_single_pdf(paper_id: int, db: Session = Depends(get_db)):
     set_pdf_path(db, paper_id, path)
     return {"status": "ok", "pdf_path": path}
 
-
 async def _batch_worker(db_session_maker, ids: List[int] | None):
-    """
-    Arka plan toplu indirme işçisi.
-    """
     db = db_session_maker()
     try:
         items = iter_candidate_papers_for_download(db, ids)
@@ -495,14 +585,7 @@ async def _batch_worker(db_session_maker, ids: List[int] | None):
     finally:
         db.close()
 
-
 def _parse_ids(ids_param: Optional[Union[str, List[str], List[int]]]) -> Optional[List[int]]:
-    """
-    UI iki şekilde gönderebilir:
-      - /download/batch?ids=1,2,3    (virgülle tek param)
-      - /download/batch?ids=1&ids=2  (tekrarlı)
-    Bu yardımcı her iki durumu da listeye çevirir.
-    """
     if ids_param is None:
         return None
     if isinstance(ids_param, list) and all(isinstance(x, int) for x in ids_param):
@@ -528,29 +611,19 @@ def _parse_ids(ids_param: Optional[Union[str, List[str], List[int]]]) -> Optiona
 
     return None
 
-
 @app.post("/download/batch")
 async def download_batch(
     background: BackgroundTasks,
     ids: Optional[Union[str, List[str], List[int]]] = Query(default=None),
     db: Session = Depends(get_db),
 ):
-    """
-    ids verilirse sadece o makaleler, verilmezse pdf_url'i dolu ve pdf_path boş olan
-    tüm makaleler indirilmeye çalışılır. Arka planda çalışır.
-    """
     id_list = _parse_ids(ids)
     total = len(iter_candidate_papers_for_download(db, id_list))
     background.add_task(_batch_worker, SessionLocal, id_list)
     return {"queued": total}
 
-
 @app.get("/export/pdfs.zip")
 def export_pdfs_zip(db: Session = Depends(get_db)):
-    """
-    İndirilen tüm PDF'leri tek bir zip halinde stream eder.
-    (Sunucuda saklama kullanan akış için opsiyonel.)
-    """
     papers = db.query(Paper).filter(Paper.pdf_path.isnot(None)).all()
     if not papers:
         raise HTTPException(status_code=404, detail="No downloaded PDFs")
@@ -580,13 +653,9 @@ def export_pdfs_zip(db: Session = Depends(get_db)):
         headers={"Content-Disposition": 'attachment; filename="papers.zip"'},
     )
 
-
 # -------------------- Similar (pgvector varsa) --------------------
 @app.get("/similar")
 def similar(db_id: int = Query(...), topk: int = 5, db: Session = Depends(get_db)):
-    """
-    pgvector kolonları yoksa güvenli şekilde boş döner.
-    """
     try:
         row = db.execute(text("SELECT embedding_v, embedding FROM papers WHERE id = :rid"), {"rid": db_id}).fetchone()
     except Exception:
@@ -641,7 +710,6 @@ def similar(db_id: int = Query(...), topk: int = 5, db: Session = Depends(get_db
         )
     return {"query_id": db_id, "neighbors": out}
 
-
 # -------------------- Graph (compat) --------------------
 @app.get("/graph")
 def graph(db: Session = Depends(get_db)):
@@ -676,10 +744,8 @@ def graph(db: Session = Depends(get_db)):
 
     return {"nodes": list(nodes.values()), "edges": edges}
 
-
 # -------------------- Keyword Stats --------------------
 stats_router = APIRouter(prefix="/stats", tags=["stats"])
-
 
 def _filtered_cte_sql(include_author_join: bool) -> str:
     joins = ""
@@ -699,14 +765,11 @@ def _filtered_cte_sql(include_author_join: bool) -> str:
     )
     """
 
-
-# Postgres regex (Python string'inde \\ kaçışları çift yazıldı)
 _KW_BAD_REGEX = (
     r'^(here\\s+(are|is)\\s+(the\\s+)?\\d*\\s*'
     r'(concise\\s+)?(topic\\s+)?keywords'
     r'(\\s+(extracted\\s+)?from\\s+the\\s+text)?\\s*:?\\s*)$'
 )
-
 
 @stats_router.get("/keywords")
 def stats_keywords(
@@ -778,7 +841,6 @@ FROM (SELECT 1) AS one
         "keyword_stats": items,
     }
 
-
 @stats_router.get("/cooccurrence")
 def stats_cooccurrence(
     limit_pairs: int = Query(200, ge=10, le=2000),
@@ -820,7 +882,6 @@ def stats_cooccurrence(
     )
     rows = db.execute(sql, params).mappings().all()
     return {"pairs": rows}
-
 
 # registrasyon
 app.include_router(stats_router)

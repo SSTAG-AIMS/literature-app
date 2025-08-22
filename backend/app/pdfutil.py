@@ -86,13 +86,50 @@ async def download_pdf_to_dir(url: str, out_dir: str, timeout_s: int = 45) -> Op
     return out_path
 
 
-async def download_pdf(url: str) -> Optional[str]:
+async def download_pdf(url: str, timeout_s: int = 60) -> Optional[str]:
     """
-    Geriye dönük uyumluluk için: temp yerine proje klasöründe tutmak daha mantıklı.
-    Bu nedenle varsayılan olarak 'data/pdfs' içine indirir ve yol döner.
+    Arama/önizleme için: PDF'i DİSKE KALICI yazmadan indirir.
+    Geçici klasöre (OS temp) indirir ve dosya yolunu döner.
+    Metin çıkarımından sonra extract_text temizler.
+
+    NOT: Diske kalıcı kaydetmek istiyorsanız download_pdf_to_dir(...) kullanın.
     """
-    out_dir = os.path.join("data", "pdfs")
-    return await download_pdf_to_dir(url, out_dir, timeout_s=60)
+    if not url:
+        return None
+
+    try:
+        async with httpx.AsyncClient(follow_redirects=True, timeout=timeout_s) as client:
+            r = await client.get(url)
+    except Exception:
+        return None
+
+    if r.status_code != 200:
+        return None
+
+    ctype = (r.headers.get("content-type") or "").lower()
+    is_pdf_header = r.content[:4] == b"%PDF"
+    if not (("pdf" in ctype) or is_pdf_header):
+        return None
+
+    # OS temp içine benzersiz geçici dosya yaz
+    fd, tmp_path = tempfile.mkstemp(prefix="tmp_pdfutil_", suffix=".pdf")
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(r.content)
+    except Exception:
+        # yazarken hata olursa dosyayı temizle
+        try:
+            os.close(fd)
+        except Exception:
+            pass
+        try:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+        except Exception:
+            pass
+        return None
+
+    return tmp_path
 
 
 # --- PDF metin çıkarma ---
@@ -100,10 +137,12 @@ async def download_pdf(url: str) -> Optional[str]:
 def extract_text(pdf_path: str) -> str:
     """
     PDF içinden düz metin çıkarır. Şifreli veya hatalı dosyalarda boş string dönebilir.
+    Eğer pdf_path bizim indirdiğimiz GEÇİCİ dosya ise, işlem sonunda otomatik siler.
     """
     if not pdf_path or not os.path.exists(pdf_path):
         return ""
 
+    text_out = ""
     try:
         # context manager ile güvenli aç/kapat
         with fitz.open(pdf_path) as doc:
@@ -120,6 +159,17 @@ def extract_text(pdf_path: str) -> str:
                 except Exception:
                     # Sayfa bazlı hata olursa devam et
                     continue
-            return "\n".join(chunks)
+            text_out = "\n".join(chunks)
     except Exception:
-        return ""
+        text_out = ""
+    finally:
+        # Eğer bizim oluşturduğumuz geçici dosyaysa temizle
+        try:
+            tmpdir = tempfile.gettempdir()
+            base = os.path.basename(pdf_path or "")
+            if pdf_path.startswith(tmpdir) and base.startswith("tmp_pdfutil_"):
+                os.remove(pdf_path)
+        except Exception:
+            pass
+
+    return text_out
