@@ -42,7 +42,7 @@ from .ui import router as ui_router
 
 # === Abstract normalizasyonu ===
 import html
-
+EMBED_DIM = 768 
 app = FastAPI(title="Literature Discovery (PostgreSQL)")
 
 # --- Static files (logo, vs.) ---
@@ -245,11 +245,26 @@ async def search_run(inp: SearchRunIn, db: Session = Depends(get_db)):
             s = sanitize_summary(s)
             kws = sanitize_keywords(kws)
 
-            # Embedding özet üzerinden
+            # ---- Embedding + Normalize ----
             emb = embed(s)
 
-            rec.update({"summary": s, "keywords": kws, "embedding": emb})
+            # normalize et
+            import numpy as np
+            arr = np.array(emb, dtype=float)
+            n = np.linalg.norm(arr)
+            emb_norm = (arr / n).tolist() if n > 0 else arr.tolist()
+
+            # Hem JSONB hem vector(768) kolonuna kaydet
+            rec.update({
+                "summary": s,
+                "keywords": kws,
+                "embedding": emb_norm,
+                "embedding_v": emb_norm
+            })
+
+
             add_paper_record(db, rec)
+            
             db.commit()
             processed += 1
             if processed >= inp.max_results:
@@ -656,8 +671,12 @@ def export_pdfs_zip(db: Session = Depends(get_db)):
 # -------------------- Similar (pgvector varsa) --------------------
 @app.get("/similar")
 def similar(db_id: int = Query(...), topk: int = 5, db: Session = Depends(get_db)):
+    # Sorgu vektörünü al
     try:
-        row = db.execute(text("SELECT embedding_v, embedding FROM papers WHERE id = :rid"), {"rid": db_id}).fetchone()
+        row = db.execute(
+            text("SELECT embedding_v, embedding FROM papers WHERE id = :rid"),
+            {"rid": db_id}
+        ).fetchone()
     except Exception:
         return {"query_id": db_id, "neighbors": []}
 
@@ -668,46 +687,55 @@ def similar(db_id: int = Query(...), topk: int = 5, db: Session = Depends(get_db
     if emb_v is None and not emb_arr:
         return {"query_id": db_id, "neighbors": []}
 
+    # pgvector sütunu yoksa (emb_v None), DB tarafında kıyaslamayacağız
     if emb_v is None:
-        try:
-            qvec = "[" + ",".join(str(float(x)) for x in emb_arr) + "]"
-        except Exception:
-            return {"query_id": db_id, "neighbors": []}
-    else:
-        qvec = str(emb_v) if isinstance(emb_v, str) else "[" + ",".join(str(float(x)) for x in emb_v) + "]"
+        return {"query_id": db_id, "neighbors": []}
 
+    # Sorgu vektörünü stringleştir
+    qvec = str(emb_v) if isinstance(emb_v, str) else "[" + ",".join(str(float(x)) for x in emb_v) + "]"
+
+    # <=> : cosine distance (0..2). 1 - distance = cosine similarity (-1..1)
+    # score_01: 0..1 aralığına normalize edilmiş skor (UI için ideal)
     try:
         rows = db.execute(
-            text(
-                """
-            SELECT p.id, p.title, p.year, p.source, p.url_pdf, p.venue,
-                   (1 - (p.embedding_v <-> CAST(:qvec AS vector(768)))) AS score_approx
-            FROM papers p
-            WHERE p.id <> :rid AND p.embedding_v IS NOT NULL
-            ORDER BY p.embedding_v <-> CAST(:qvec AS vector(768))
-            LIMIT :k
-        """
-            ),
+            text("""
+                SELECT p.id, p.title, p.year, p.source, p.url_pdf, p.venue,
+                    (1 - (p.embedding_v <=> CAST(:qvec AS vector(768)))) AS score
+                FROM papers p
+                WHERE p.id <> :rid AND p.embedding_v IS NOT NULL
+                ORDER BY p.embedding_v <=> CAST(:qvec AS vector(768))  -- küçük uzaklık daha iyi
+                LIMIT :k
+            """),
             {"rid": db_id, "qvec": qvec, "k": topk},
         ).fetchall()
+
     except Exception:
         return {"query_id": db_id, "neighbors": []}
 
+    # Yazarlarda N+1 olmasın diye hepsini tek seferde çek
+    ids = [rid for (rid, *_rest) in rows]
+    paper_map = {p.id: p for p in db.query(Paper).filter(Paper.id.in_(ids)).all()}
+
     out = []
-    for rid, title, year, source, url_pdf, venue, score in rows:
-        authors = [pa.author.name for pa in db.query(Paper).filter(Paper.id == rid).one().authors]
-        out.append(
-            {
-                "db_id": rid,
-                "score": round(float(score), 4) if score is not None else None,
-                "title": title,
-                "authors": authors,
-                "year": year,
-                "source": source,
-                "url_pdf": url_pdf,
-                "venue": venue,
-            }
-        )
+    for rid, title, year, source, url_pdf, venue, cos_sim in rows:
+        # cos_sim [-1,1] → 0..1 aralığına normalize
+        if cos_sim is None:
+            score_01 = None
+        else:
+            score_01 = max(0.0, min(1.0, (float(cos_sim) + 1.0) / 2.0))
+
+        authors = [pa.author.name for pa in getattr(paper_map.get(rid), "authors", [])] if rid in paper_map else []
+        out.append({
+            "db_id": rid,
+            "score": round(score_01, 4) if score_01 is not None else None,   # 0..1
+            "title": title,
+            "authors": authors,
+            "year": year,
+            "source": source,
+            "url_pdf": url_pdf,
+            "venue": venue,
+        })
+
     return {"query_id": db_id, "neighbors": out}
 
 # -------------------- Graph (compat) --------------------

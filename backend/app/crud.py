@@ -3,6 +3,7 @@
 from typing import List, Dict, Any, Optional, Iterable
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import IntegrityError
+from sqlalchemy import text  # <-- eklendi
 
 from .models import Paper, Author, PaperAuthor, Keyword, PaperKeyword
 
@@ -16,6 +17,21 @@ def _to_float_list(v) -> Optional[List[float]]:
     except Exception:
         return None
 
+def _set_embedding_v(db: Session, paper_id: int, emb_list: Optional[List[float]]):
+    """
+    emb_list'i pgvector sütununa yazar. pgvector yoksa sessizce geçer.
+    """
+    if not emb_list:
+        return
+    try:
+        vec_literal = "[" + ",".join(str(float(x)) for x in emb_list) + "]"
+        db.execute(
+            text("UPDATE papers SET embedding_v = CAST(:v AS vector(768)) WHERE id = :id"),
+            {"v": vec_literal, "id": paper_id},
+        )
+    except Exception:
+        # pgvector kurulu değilse ya da cast başarısızsa uygulama akışını bozma
+        pass
 
 def get_or_create_author(db: Session, name: str) -> Author:
     name = (name or "").strip()
@@ -27,7 +43,6 @@ def get_or_create_author(db: Session, name: str) -> Author:
     db.flush()
     return a
 
-
 def get_or_create_keyword(db: Session, term: str) -> Keyword:
     term = (term or "").strip()
     k = db.query(Keyword).filter(Keyword.term == term).one_or_none()
@@ -37,7 +52,6 @@ def get_or_create_keyword(db: Session, term: str) -> Keyword:
     db.add(k)
     db.flush()
     return k
-
 
 # ---- çekirdek CRUD ----------------------------------------------------------
 
@@ -91,6 +105,10 @@ def add_paper_record(db: Session, rec: Dict[str, Any]) -> Optional[Paper]:
             db.rollback()
             return p
 
+        # pgvector sütununu güncelle
+        emb_src = emb_list or (p.embedding if getattr(p, "embedding", None) else None)
+        _set_embedding_v(db, p.id, emb_src)
+
         # authors/keywords ekle (eksik olanları ekle, var olanı koru)
         existing_authors = {pa.author.name for pa in p.authors}
         for idx, name in enumerate(authors_in):
@@ -135,6 +153,9 @@ def add_paper_record(db: Session, rec: Dict[str, Any]) -> Optional[Paper]:
             p = db.query(Paper).filter(Paper.url_pdf == url_pdf).one_or_none()
         return p
 
+    # yeni kayıtta pgvector sütununu doldur
+    _set_embedding_v(db, p.id, emb_list)
+
     # authors
     for idx, name in enumerate(authors_in):
         name = (name or "").strip()
@@ -154,12 +175,10 @@ def add_paper_record(db: Session, rec: Dict[str, Any]) -> Optional[Paper]:
     db.flush()
     return p
 
-
 # ---- indirme akışı için yardımcılar -----------------------------------------
 
 def get_paper(db: Session, paper_id: int) -> Optional[Paper]:
     return db.query(Paper).filter(Paper.id == paper_id).one_or_none()
-
 
 def set_pdf_path(db: Session, paper_id: int, pdf_path: Optional[str]) -> bool:
     p = get_paper(db, paper_id)
@@ -170,7 +189,6 @@ def set_pdf_path(db: Session, paper_id: int, pdf_path: Optional[str]) -> bool:
     db.commit()
     return True
 
-
 def iter_candidate_papers_for_download(db: Session, ids: Optional[Iterable[int]] = None) -> List[Paper]:
     q = db.query(Paper)
     if ids:
@@ -179,7 +197,6 @@ def iter_candidate_papers_for_download(db: Session, ids: Optional[Iterable[int]]
     q = q.filter(Paper.url_pdf.isnot(None)).filter(Paper.url_pdf != "")
     q = q.filter((Paper.pdf_path.is_(None)) | (Paper.pdf_path == ""))
     return q.order_by(Paper.id.desc()).all()
-
 
 # ---- read tarafı ------------------------------------------------------------
 
@@ -199,11 +216,9 @@ def list_papers(db: Session, limit: int = 50):
         })
     return out
 
-
 def all_papers_for_graph(db: Session):
     # küçük/orta veri için yeterli; büyürse sayfalama/filtre düşünülür
     return db.query(Paper).all()
-
 
 def fetch_all_embeddings(db: Session):
     """

@@ -296,7 +296,7 @@ HTML = """
       empty.style.display = 'none';
       arr.forEach(x=>{
         const tr = document.createElement('tr');
-        const score = (x.score != null) ? Number(x.score).toFixed(4) : '';
+        const score = (x.score != null) ? (Math.round(x.score * 100) + '%') : '';
         tr.innerHTML = `
           <td>${score}</td>
           <td>${x.title || ''}</td>

@@ -10,7 +10,7 @@ def _pick_pdf_url(w: dict) -> str | None:
     for loc in (oa.get("open_access_locations") or []):
         if loc.get("url_for_pdf"):
             return loc["url_for_pdf"]
-    # 3) host_venue . pdf_url (nadir)
+    # 3) host_venue.pdf_url (nadir)
     hv = w.get("host_venue") or {}
     if hv.get("pdf_url"):
         return hv["pdf_url"]
@@ -19,30 +19,50 @@ def _pick_pdf_url(w: dict) -> str | None:
         return oa["oa_url"]
     return None
 
-async def search_openalex_async(query: str, limit=8):
+
+async def search_openalex_async(query: str, limit: int = 8):
     base = "https://api.openalex.org/works"
     params = {
         "search": query,
         "filter": "open_access.is_oa:true",
-        "per_page": limit
+        "per_page": max(1, int(limit)),
     }
     async with httpx.AsyncClient(timeout=30) as client:
         r = await client.get(base, params=params)
         r.raise_for_status()
+
         out = []
-        for w in r.json().get("results", []):
+        for w in r.json().get("results", []) or []:
             title = w.get("title")
             year = w.get("publication_year")
-            doi = (w.get("doi") or "").replace("https://doi.org/","").strip() if w.get("doi") else None
-            abstract = (w.get("abstract") or "").replace("\n"," ").strip()
-            pdf = _pick_pdf_url(w)  # <-- BURASI ÖNEMLİ
+            doi = (w.get("doi") or "")
+            if doi:
+                doi = doi.replace("https://doi.org/", "").strip()
+
+            # ÖNEMLİ: abstract burada temizlenmiyor; ham halde bırakılıyor.
+            # _pick_abstract(main.py) zaten abstract_inverted_index'i decode edip normalize edecek.
+            abstract = w.get("abstract")  # ham
+            inv_idx = w.get("abstract_inverted_index")  # ham inverted index (dict)
+
+            pdf = _pick_pdf_url(w)
+
             authors = []
             for a in (w.get("authorships") or []):
-                if a.get("author") and a["author"].get("display_name"):
-                    authors.append(a["author"]["display_name"])
+                disp = a.get("author", {}).get("display_name")
+                if disp:
+                    authors.append(disp)
+
             venue = (w.get("host_venue") or {}).get("display_name")
+
             out.append({
-                "title": title, "year": year, "doi": doi, "abstract": abstract,
-                "url_pdf": pdf, "authors": authors, "source":"OpenAlex", "venue": venue
+                "title": title,
+                "year": year,
+                "doi": doi or None,
+                "abstract": abstract,  # ham bırak
+                "openalex_abstract_inverted_index": inv_idx,  # main.py bunu okuyacak
+                "url_pdf": pdf,
+                "authors": authors or None,
+                "source": "OpenAlex",
+                "venue": venue,
             })
         return out
