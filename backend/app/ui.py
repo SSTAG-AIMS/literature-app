@@ -4,7 +4,7 @@ from fastapi.responses import HTMLResponse
 
 router = APIRouter()
 
-HTML = """
+HTML = r"""
 <!DOCTYPE html>
 <html lang="tr">
 <head>
