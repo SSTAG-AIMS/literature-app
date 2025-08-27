@@ -685,4 +685,4 @@ HTML = """
 
 @router.get("/ui", response_class=HTMLResponse)
 def ui():
-    return HTML
+    return 
