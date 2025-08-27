@@ -11,6 +11,9 @@ import asyncio
 from pathlib import Path
 from typing import List, Optional, Union, Any, Dict
 from urllib.parse import quote
+from uuid import uuid4
+import time
+from threading import Lock
 
 import httpx
 import fitz  # PyMuPDF
@@ -32,17 +35,19 @@ from .crud import (
 from .db import SessionLocal, get_db
 from .llm import embed, expand_queries, keywords, sanitize_keywords, sanitize_summary, summarize
 from .models import Author, Paper, PaperAuthor
-# Not: Arama sırasında artık diske yazmayacağız; sadece explicit indirme için kullanacağız
+# Arama sırasında artık diske yazmayacağız; sadece explicit indirme için kullanacağız
 from .pdfutil import download_pdf_to_dir
 from .sources import search_openalex_async
 from .sources_arxiv import search_arxiv_async
 from .sources_crossref import search_crossref_async
 from .sources_dergipark import search_dergipark_async
+from .sources_unpaywall import enrich_with_unpaywall  # <= Unpaywall entegrasyonu
 from .ui import router as ui_router
 
 # === Abstract normalizasyonu ===
 import html
-EMBED_DIM = 768 
+
+EMBED_DIM = 768
 app = FastAPI(title="Literature Discovery (PostgreSQL)")
 
 # --- Static files (logo, vs.) ---
@@ -53,6 +58,49 @@ app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 # UI router
 app.include_router(ui_router)
+
+# ---- Progress tracking (in-memory) ----
+JOBS: Dict[str, Dict[str, Any]] = {}
+JOBS_LOCK = Lock()
+
+def _job_new(topic: str, target: int) -> str:
+    jid = uuid4().hex[:12]
+    with JOBS_LOCK:
+        JOBS[jid] = {
+            "id": jid,
+            "status": "running",      # running | done | error | cancelled
+            "stage": "starting",      # starting | fetching | processing | done
+            "topic": topic,
+            "target": int(target),
+            "queries": [],
+            "source_total": 0,
+            "source_done": 0,
+            "candidates_total": 0,
+            "processed": 0,
+            "ingested": 0,
+            "skipped": 0,
+            "errors": 0,
+            "last_title": "",
+            "started_at": time.time(),
+            "cancelled": False,
+            "percent": 0,             # 0..100
+            "since_id": None,
+        }
+    return jid
+
+def _job_get(jid: str) -> Optional[Dict[str, Any]]:
+    with JOBS_LOCK:
+        return JOBS.get(jid)
+
+def _job_update(jid: str, **kw):
+    with JOBS_LOCK:
+        if jid in JOBS:
+            JOBS[jid].update(kw)
+
+def _job_finish(jid: str, status: str = "done", **kw):
+    with JOBS_LOCK:
+        if jid in JOBS:
+            JOBS[jid].update({"status": status, "stage": "done", "percent": 100} | kw)
 
 # -------------------- Abstract Normalizasyonu (OpenAlex/Crossref/arXiv/DergiPark) --------------------
 _TAG_RE = re.compile(r"<[^>]+>")
@@ -153,12 +201,7 @@ async def _fetch_pdf_text(url: str, timeout_s: int = 60) -> str:
     if r.status_code != 200 or not r.content:
         return ""
 
-    ctype = (r.headers.get("content-type") or "").lower()
-    looks_like_pdf = (r.content[:4] == b"%PDF") or ("pdf" in ctype)
-    if not looks_like_pdf:
-        # Bazı sunucular content-type'ı yanlış döndürür; yine de dene
-        pass
-
+    # Content-type yanlış da gelebilir; yine de deneyelim
     try:
         with fitz.open(stream=r.content, filetype="pdf") as doc:
             if doc.is_encrypted:
@@ -176,6 +219,17 @@ async def _fetch_pdf_text(url: str, timeout_s: int = 60) -> str:
     except Exception:
         return ""
 
+# -------------------- Yardımcı: vektör normalize (numpy'sız) --------------------
+def _l2_normalize(vec: List[float]) -> List[float]:
+    try:
+        s = sum((float(x) * float(x)) for x in vec)
+        if s <= 0:
+            return [float(x) for x in vec]
+        inv = 1.0 / (s ** 0.5)
+        return [float(x) * inv for x in vec]
+    except Exception:
+        return [float(x) for x in vec]
+
 # -------------------- Health --------------------
 @app.get("/health")
 def health():
@@ -186,7 +240,153 @@ def health():
         "static_dir": str(STATIC_DIR),
     }
 
-# -------------------- Search & Ingest --------------------
+# ==================== Progress'li SEARCH Worker ====================
+async def _search_worker(db_session_maker, jid: str, topic: str, max_results: int):
+    db = db_session_maker()
+    try:
+        # 1) Sorgu genişlet
+        qs = expand_queries(topic)
+        _job_update(jid, stage="fetching", queries=qs)
+
+        # Kaynaklar
+        registered = [
+            ("openalex", search_openalex_async),
+            ("dergipark", search_dergipark_async),
+            ("arxiv",    search_arxiv_async),
+            ("crossref", search_crossref_async),
+        ]
+
+        denom = max(1, len(qs) * max(1, len(registered)))
+        per_task = max(2, max_results // denom or 2)
+
+        _job_update(jid, source_total=len(qs) * len(registered))
+
+        async def _wrap(name, fn, query):
+            try:
+                res = await fn(query, limit=per_task)
+                return res
+            except Exception:
+                j = _job_get(jid)
+                if j:
+                    _job_update(jid, errors=j["errors"] + 1)
+                return []
+            finally:
+                j = _job_get(jid)
+                if j and not j.get("cancelled"):
+                    done = j["source_done"] + 1
+                    total = max(1, j["source_total"])
+                    # ilk 40%: fetch aşaması
+                    pct = min(99, int(40 * (done / total)))
+                    _job_update(jid, source_done=done, percent=pct)
+
+        # 2) Paralel kaynak çağrıları
+        tasks = []
+        for q in qs:
+            for name, fn in registered:
+                tasks.append(_wrap(name, fn, q))
+
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+
+        candidates: List[dict] = []
+        for r in results:
+            if isinstance(r, Exception):
+                _job_update(jid, errors=_job_get(jid)["errors"] + 1)
+                continue
+            candidates.extend(r)
+
+        _job_update(jid, candidates_total=len(candidates), stage="processing")
+
+        # 3) Adayları işle
+        ingested = 0
+        for rec in candidates:
+            j = _job_get(jid)
+            if not j or j.get("cancelled"):
+                _job_finish(jid, status="cancelled")
+                return
+
+            _job_update(jid, processed=j["processed"] + 1, last_title=rec.get("title", ""))
+
+            # --- Unpaywall ile DOI -> OA PDF dene (url_pdf yoksa doldurabilir) ---
+            try:
+                email = getattr(settings, "unpaywall_email", "") or ""
+                if email and rec.get("doi") and not rec.get("url_pdf"):
+                    await enrich_with_unpaywall(rec, email)
+            except Exception:
+                pass
+
+            # PDF URL yoksa atla
+            if not rec.get("url_pdf"):
+                _job_update(jid, skipped=j["skipped"] + 1)
+                continue
+
+            # ---- ABSTRACT NORMALİZASYONU ----
+            try:
+                new_abs = _pick_abstract(rec)
+                if new_abs:
+                    rec["abstract"] = new_abs
+            except Exception:
+                pass
+
+            # ---- Metin tabanı: eager mem-indirme açıksa PDF'ten, değilse abstract/title ----
+            base = ""
+            if getattr(settings, "eager_pdf_download", False):
+                try:
+                    base = await _fetch_pdf_text(rec["url_pdf"]) or ""
+                except Exception:
+                    base = ""
+            if not base:
+                base = rec.get("abstract", "") or rec.get("title", "") or ""
+
+            # Metin yoksa LLM'e girmeyelim
+            if not base.strip():
+                _job_update(jid, skipped=j["skipped"] + 1)
+                continue
+
+            try:
+                # ---- LLM ----
+                s = summarize(base)
+                kws = keywords(base)
+
+                # ---- Sanitization ----
+                s = sanitize_summary(s)
+                kws = sanitize_keywords(kws)
+
+                # ---- Embedding + normalize ----
+                emb = _l2_normalize(embed(s))
+
+                # Hem JSONB hem vector(768) kolonuna kaydet
+                rec.update({
+                    "summary": s,
+                    "keywords": kws,
+                    "embedding": emb,
+                    "embedding_v": emb
+                })
+
+                add_paper_record(db, rec)
+                db.commit()
+                ingested += 1
+                _job_update(jid, ingested=ingested)
+            except Exception:
+                db.rollback()
+                _job_update(jid, errors=_job_get(jid)["errors"] + 1)
+
+            # yüzde: 40% (fetch) + 60% (işleme, hedefe göre)
+            j = _job_get(jid)
+            if j:
+                proc_ratio = min(1.0, ingested / max(1, j["target"]))
+                pct = int(40 + 60 * proc_ratio)
+                _job_update(jid, percent=min(99, pct))
+
+            if ingested >= max_results:
+                break
+
+        _job_finish(jid, status="done")
+    except Exception:
+        _job_finish(jid, status="error")
+    finally:
+        db.close()
+
+# -------------------- Search & Ingest (eski /search/run duruyor) --------------------
 class SearchRunIn(BaseModel):
     topic: str
     max_results: int = 20
@@ -222,7 +422,15 @@ async def search_run(inp: SearchRunIn, db: Session = Depends(get_db)):
     processed = 0
     for rec in candidates:
         try:
-            # PDF URL yoksa atla (ama diske kaydetme!)
+            # --- Unpaywall ile DOI -> OA PDF dene (url_pdf yoksa doldurabilir) ---
+            try:
+                email = getattr(settings, "unpaywall_email", "") or ""
+                if email and rec.get("doi") and not rec.get("url_pdf"):
+                    await enrich_with_unpaywall(rec, email)
+            except Exception as e:
+                print("UNPAYWALL ERROR:", e)
+
+            # PDF URL yoksa (Unpaywall sonrası da) atla
             if not rec.get("url_pdf"):
                 continue
 
@@ -231,11 +439,16 @@ async def search_run(inp: SearchRunIn, db: Session = Depends(get_db)):
             if new_abs:
                 rec["abstract"] = new_abs
 
-            # ---- PDF metnini bellekten oku ----
-            text_content = await _fetch_pdf_text(rec["url_pdf"])
+            # ---- Metin tabanı: eager mem-indirme açıksa PDF'ten, değilse abstract/title ----
+            base = ""
+            if getattr(settings, "eager_pdf_download", False):
+                base = await _fetch_pdf_text(rec["url_pdf"]) or ""
+            if not base:
+                base = rec.get("abstract", "") or rec.get("title", "") or ""
 
-            # Bellekten metin çıkmazsa abstract / başlıkla devam et
-            base = text_content or rec.get("abstract", "") or rec.get("title") or ""
+            # Metin yoksa LLM'e girmeyelim
+            if not base.strip():
+                continue
 
             # ---- LLM ----
             s = summarize(base)
@@ -245,26 +458,18 @@ async def search_run(inp: SearchRunIn, db: Session = Depends(get_db)):
             s = sanitize_summary(s)
             kws = sanitize_keywords(kws)
 
-            # ---- Embedding + Normalize ----
-            emb = embed(s)
-
-            # normalize et
-            import numpy as np
-            arr = np.array(emb, dtype=float)
-            n = np.linalg.norm(arr)
-            emb_norm = (arr / n).tolist() if n > 0 else arr.tolist()
+            # ---- Embedding + normalize ----
+            emb = _l2_normalize(embed(s))
 
             # Hem JSONB hem vector(768) kolonuna kaydet
             rec.update({
                 "summary": s,
                 "keywords": kws,
-                "embedding": emb_norm,
-                "embedding_v": emb_norm
+                "embedding": emb,
+                "embedding_v": emb
             })
 
-
             add_paper_record(db, rec)
-            
             db.commit()
             processed += 1
             if processed >= inp.max_results:
@@ -274,6 +479,38 @@ async def search_run(inp: SearchRunIn, db: Session = Depends(get_db)):
             print("PIPELINE/DB ERROR:", e)
 
     return {"topic": inp.topic, "queries": qs, "processed": processed}
+
+# -------------------- Yeni: Search start/progress/cancel --------------------
+class SearchStartIn(BaseModel):
+    topic: str
+    max_results: int = 20
+
+@app.post("/search/start")
+def search_start(inp: SearchStartIn, background: BackgroundTasks, db: Session = Depends(get_db)):
+    # Bu anın öncesindeki son id'yi işaretle (UI yeni eklenenleri göstermek için kullanacak)
+    base_id = db.execute(select(func.max(Paper.id))).scalar() or 0
+
+    jid = _job_new(inp.topic, inp.max_results)
+    _job_update(jid, since_id=base_id)
+
+    background.add_task(_search_worker, SessionLocal, jid, inp.topic, inp.max_results)
+    return {"job_id": jid, "since_id": base_id}
+
+@app.get("/search/progress/{job_id}")
+def search_progress(job_id: str):
+    j = _job_get(job_id)
+    if not j:
+        raise HTTPException(status_code=404, detail="job not found")
+    elapsed = time.time() - j["started_at"]
+    return {**j, "elapsed_sec": int(elapsed)}
+
+@app.post("/search/cancel/{job_id}")
+def search_cancel(job_id: str):
+    j = _job_get(job_id)
+    if not j:
+        raise HTTPException(status_code=404, detail="job not found")
+    _job_update(job_id, cancelled=True)
+    return {"status": "ok"}
 
 # -------------------- Papers (filters + pagination + sorting) --------------------
 @app.get("/papers")
@@ -287,6 +524,7 @@ def papers(
     sort_dir: str = Query("desc", description="asc | desc"),
     page: int = Query(1, ge=1),
     page_size: int = Query(20, ge=1, le=100),
+    min_id: Optional[int] = Query(None, description="Sadece bu id’den büyük olanlar"),  # <<< EKLENDİ
     db: Session = Depends(get_db),
 ):
     stmt = select(Paper)
@@ -304,6 +542,8 @@ def papers(
             .join(Author, Author.id == PaperAuthor.author_id, isouter=True)
             .where(Author.name.ilike(f"%{author}%"))
         )
+    if min_id is not None:                              # <<< EKLENDİ
+        stmt = stmt.where(Paper.id > min_id)
 
     total = db.execute(stmt.with_only_columns(func.count(func.distinct(Paper.id)))).scalar_one()
 
@@ -375,6 +615,7 @@ def export_csv(
     source: Optional[str] = Query(None),
     sort_by: str = Query("year"),
     sort_dir: str = Query("desc"),
+    min_id: Optional[int] = Query(None),  # <<< Yeni filtre buraya da uygulandı
     db: Session = Depends(get_db),
 ):
     stmt = select(Paper)
@@ -392,6 +633,8 @@ def export_csv(
             .join(Author, Author.id == PaperAuthor.author_id, isouter=True)
             .where(Author.name.ilike(f"%{author}%"))
         )
+    if min_id is not None:
+        stmt = stmt.where(Paper.id > min_id)
 
     if sort_by == "ingested":
         stmt = stmt.order_by(Paper.id.asc() if sort_dir == "asc" else Paper.id.desc())
@@ -440,6 +683,7 @@ def export_bibtex(
     source: Optional[str] = Query(None),
     sort_by: str = Query("year"),
     sort_dir: str = Query("desc"),
+    min_id: Optional[int] = Query(None),  # <<< Yeni filtre buraya da uygulandı
     db: Session = Depends(get_db),
 ):
     stmt = select(Paper)
@@ -457,6 +701,8 @@ def export_bibtex(
             .join(Author, Author.id == PaperAuthor.author_id, isouter=True)
             .where(Author.name.ilike(f"%{author}%"))
         )
+    if min_id is not None:
+        stmt = stmt.where(Paper.id > min_id)
 
     if sort_by == "ingested":
         stmt = stmt.order_by(Paper.id.asc() if sort_dir == "asc" else Paper.id.desc())
@@ -698,12 +944,12 @@ def similar(db_id: int = Query(...), topk: int = 5, db: Session = Depends(get_db
     # score_01: 0..1 aralığına normalize edilmiş skor (UI için ideal)
     try:
         rows = db.execute(
-            text("""
+            text(f"""
                 SELECT p.id, p.title, p.year, p.source, p.url_pdf, p.venue,
-                    (1 - (p.embedding_v <=> CAST(:qvec AS vector(768)))) AS score
+                    (1 - (p.embedding_v <=> CAST(:qvec AS vector({EMBED_DIM})))) AS score
                 FROM papers p
                 WHERE p.id <> :rid AND p.embedding_v IS NOT NULL
-                ORDER BY p.embedding_v <=> CAST(:qvec AS vector(768))  -- küçük uzaklık daha iyi
+                ORDER BY p.embedding_v <=> CAST(:qvec AS vector({EMBED_DIM}))  -- küçük uzaklık daha iyi
                 LIMIT :k
             """),
             {"rid": db_id, "qvec": qvec, "k": topk},
@@ -790,6 +1036,7 @@ def _filtered_cte_sql(include_author_join: bool) -> str:
         AND (:min_year IS NULL OR p.year >= :min_year)
         AND (:max_year IS NULL OR p.year <= :max_year)
         {"AND (:author IS NULL OR a.name ILIKE :author)" if include_author_join else ""}
+        AND (:min_id IS NULL OR p.id > :min_id)
     )
     """
 
@@ -808,6 +1055,7 @@ def stats_keywords(
     source: Optional[str] = Query(None),
     min_year: Optional[int] = Query(None),
     max_year: Optional[int] = Query(None),
+    min_id: Optional[int] = Query(None),
     db: Session = Depends(get_db),
 ):
     params = {
@@ -818,6 +1066,7 @@ def stats_keywords(
         "max_year": max_year,
         "limit": limit,
         "min_count": min_count,
+        "min_id": min_id,
     }
     cte = _filtered_cte_sql(include_author_join=author is not None)
 
@@ -878,6 +1127,7 @@ def stats_cooccurrence(
     source: Optional[str] = Query(None),
     min_year: Optional[int] = Query(None),
     max_year: Optional[int] = Query(None),
+    min_id: Optional[int] = Query(None),
     db: Session = Depends(get_db),
 ):
     params = {
@@ -888,6 +1138,7 @@ def stats_cooccurrence(
         "max_year": max_year,
         "limit_pairs": limit_pairs,
         "min_pair_count": min_pair_count,
+        "min_id": min_id,
     }
     cte = _filtered_cte_sql(include_author_join=author is not None)
 

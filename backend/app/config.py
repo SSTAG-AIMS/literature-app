@@ -10,5 +10,6 @@ class Settings(BaseSettings):
     database_url: str
     ollama_url: str = "http://localhost:11434"
     model_config = SettingsConfigDict(env_file=ENV_FILE, env_file_encoding="utf-8")
-
+    unpaywall_email: str = "kadir55301102@gmail.com"  # .env ile override edilir
+    eager_pdf_download: bool = False   
 settings = Settings()

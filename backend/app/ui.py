@@ -4,7 +4,7 @@ from fastapi.responses import HTMLResponse
 
 router = APIRouter()
 
-HTML = r"""
+HTML = """
 <!DOCTYPE html>
 <html lang="tr">
 <head>
@@ -37,7 +37,7 @@ HTML = r"""
   button:hover { background-color: var(--priH); }
   button[disabled] { opacity: .6; cursor: not-allowed; }
   #status { margin-top: 10px; font-style: italic; color: #555; min-height: 22px; }
-  
+
   /* Görselleştirme alanı */
   #graph { width: 100%; min-height: 240px; border: 1px solid var(--line); margin-top: 16px; background: var(--card); border-radius: 6px; padding: 12px; }
 
@@ -85,74 +85,11 @@ HTML = r"""
   /* İndirme araç çubuğu */
   #dlbar { display:flex; gap:8px; align-items:center; justify-content:flex-end; margin-top:8px; flex-wrap: wrap; }
 
-  /* =========================
-     Loader (hourglass) STYLES
-     ========================= */
-
-  /* Loader yerleşimi */
-  .loader{display:flex;justify-content:center;align-items:center;margin:12px 0}
-  .hourglass{--dur:2s;width:80px;height:80px;display:block}
-
-  /* Animasyon atamaları (düz CSS) */
-  .hourglass__glare-top,
-  .hourglass__glare-bottom,
-  .hourglass__model,
-  .hourglass__motion-thick,
-  .hourglass__motion-medium,
-  .hourglass__motion-thin,
-  .hourglass__sand-drop,
-  .hourglass__sand-fill,
-  .hourglass__sand-grain-left,
-  .hourglass__sand-grain-right,
-  .hourglass__sand-line-left,
-  .hourglass__sand-line-right{
-    animation-duration:var(--dur);
-    animation-timing-function:cubic-bezier(0.83,0,0.17,1);
-    animation-iteration-count:infinite;
-  }
-
-  /* Hangi elemana hangi animasyon */
-  .hourglass__glare-top{animation-name:glare-top}
-  .hourglass__glare-bottom{animation-name:glare-bottom}
-  .hourglass__model{animation-name:hourglass-flip;transform-origin:12.25px 16.75px}
-  .hourglass__motion-thick,
-  .hourglass__motion-medium,
-  .hourglass__motion-thin{transform-origin:26px 26px}
-  .hourglass__motion-thick{animation-name:motion-thick}
-  .hourglass__motion-medium{animation-name:motion-medium}
-  .hourglass__motion-thin{animation-name:motion-thin}
-  .hourglass__sand-drop{animation-name:sand-drop}
-  .hourglass__sand-fill{animation-name:sand-fill}
-  .hourglass__sand-grain-left{animation-name:sand-grain-left}
-  .hourglass__sand-grain-right{animation-name:sand-grain-right}
-  .hourglass__sand-line-left{animation-name:sand-line-left}
-  .hourglass__sand-line-right{animation-name:sand-line-right}
-
-  /* Keyframes (SCSS’teki ease değerlerini sabitlerle değiştirdim) */
-  @keyframes hourglass-flip{from{transform:translate(13.75px,9.25px) rotate(-180deg)}24%,to{transform:translate(13.75px,9.25px) rotate(0)}}
-  @keyframes glare-top{from{stroke:hsla(0,0%,100%,0)}24%,to{stroke:hsl(0,0%,100%)}}
-  @keyframes glare-bottom{from{stroke:hsl(0,0%,100%)}24%,to{stroke:hsla(0,0%,100%,0)}}
-  @keyframes motion-thick{
-    from{animation-timing-function:cubic-bezier(0.33,0,0.67,0);stroke:hsla(0,0%,100%,0);stroke-dashoffset:153.94;transform:rotate(.67turn)}
-    20%{animation-timing-function:cubic-bezier(0.33,1,0.67,1);stroke:hsl(0,0%,100%);stroke-dashoffset:141.11;transform:rotate(1turn)}
-    40%,to{stroke:hsla(0,0%,100%,0);stroke-dashoffset:153.94;transform:rotate(1.33turn)}
-  }
-  @keyframes motion-medium{
-    from,8%{animation-timing-function:cubic-bezier(0.33,0,0.67,0);stroke:hsla(0,0%,100%,0);stroke-dashoffset:153.94;transform:rotate(.5turn)}
-    20%{animation-timing-function:cubic-bezier(0.33,1,0.67,1);stroke:hsl(0,0%,100%);stroke-dashoffset:147.53;transform:rotate(.83turn)}
-    32%,to{stroke:hsla(0,0%,100%,0);stroke-dashoffset:153.94;transform:rotate(1.17turn)}
-  }
-  @keyframes motion-thin{
-    from,4%{animation-timing-function:cubic-bezier(0.33,0,0.67,0);stroke:hsla(0,0%,100%,0);stroke-dashoffset:153.94;transform:rotate(.33turn)}
-    24%{animation-timing-function:cubic-bezier(0.33,1,0.67,1);stroke:hsl(0,0%,100%);stroke-dashoffset:134.7;transform:rotate(.67turn)}
-    44%,to{stroke:hsla(0,0%,100%,0);stroke-dashoffset:153.94;transform:rotate(1turn)}
-  }
-  @keyframes sand-drop{from,10%{animation-timing-function:cubic-bezier(.12,0,.39,0);stroke-dashoffset:1}70%,to{stroke-dashoffset:-107}}
-  @keyframes sand-fill{from,10%{animation-timing-function:cubic-bezier(.12,0,.39,0);stroke-dashoffset:55}70%,to{stroke-dashoffset:-54}}
-  @keyframes sand-grain-left{from,10%{animation-timing-function:cubic-bezier(.12,0,.39,0);stroke-dashoffset:29}70%,to{stroke-dashoffset:-22}}
-  @keyframes sand-grain-right{from,10%{animation-timing-function:cubic-bezier(.12,0,.39,0);stroke-dashoffset:27}70%,to{stroke-dashoffset:-24}}
-  @keyframes sand-line-left{from,10%{animation-timing-function:cubic-bezier(.12,0,.39,0);stroke-dashoffset:53}70%,to{stroke-dashoffset:-55}}
-  @keyframes sand-line-right{from,10%{animation-timing-function:cubic-bezier(.12,0,.39,0);stroke-dashoffset:14}70%,to{stroke-dashoffset:-24.5}}
+  /* Progress */
+  #progress { display:none; gap:8px; align-items:center; margin:8px 0; }
+  #pbar { width:260px; height:10px; background:#e9ecef; border-radius:999px; overflow:hidden; }
+  #pbar>div { height:100%; width:0%; background: var(--pri); }
+  #pcnt { min-width:42px; text-align:right; font-variant-numeric: tabular-nums; color:#333; }
 </style>
 </head>
 <body>
@@ -220,47 +157,12 @@ HTML = r"""
 
   <div id="status"></div>
 
-  <!-- LOADER: #status’un hemen altında -->
-  <div id="loader" class="loader" aria-live="polite" style="display:none">
-    <!-- Hourglass SVG -->
-    <svg class="hourglass" viewBox="0 0 56 56" width="56" height="56" role="img" aria-label="Yükleniyor">
-      <clipPath id="sand-mound-top">
-        <path d="M 14.613 13.087 C 15.814 12.059 19.3 8.039 20.3 6.539 C 21.5 4.789 21.5 2.039 21.5 2.039 L 3 2.039 C 3 2.039 3 4.789 4.2 6.539 C 5.2 8.039 8.686 12.059 9.887 13.087 C 11 14.039 12.25 14.039 12.25 14.039 C 12.25 14.039 13.5 14.039 14.613 13.087 Z" />
-      </clipPath>
-      <clipPath id="sand-mound-bottom">
-        <path d="M 14.613 20.452 C 15.814 21.48 19.3 25.5 20.3 27 C 21.5 28.75 21.5 31.5 21.5 31.5 L 3 31.5 C 3 31.5 3 28.75 4.2 27 C 5.2 25.5 8.686 21.48 9.887 20.452 C 11 19.5 12.25 19.5 12.25 19.5 C 12.25 19.5 13.5 19.5 14.613 20.452 Z" />
-      </clipPath>
-      <g transform="translate(2,2)">
-        <g fill="none" stroke="hsl(0,0%,100%)" stroke-dasharray="153.94 153.94" stroke-dashoffset="153.94" stroke-linecap="round" transform="rotate(-90,26,26)">
-          <circle class="hourglass__motion-thick" stroke-width="2.5" cx="26" cy="26" r="24.5" transform="rotate(0,26,26)" />
-          <circle class="hourglass__motion-medium" stroke-width="1.75" cx="26" cy="26" r="24.5" transform="rotate(90,26,26)" />
-          <circle class="hourglass__motion-thin" stroke-width="1" cx="26" cy="26" r="24.5" transform="rotate(180,26,26)" />
-        </g>
-        <g class="hourglass__model" transform="translate(13.75,9.25)">
-          <path fill="hsl(var(--hue),90%,85%)" d="M 1.5 2 L 23 2 C 23 2 22.5 8.5 19 12 C 16 15.5 13.5 13.5 13.5 16.75 C 13.5 20 16 18 19 21.5 C 22.5 25 23 31.5 23 31.5 L 1.5 31.5 C 1.5 31.5 2 25 5.5 21.5 C 8.5 18 11 20 11 16.75 C 11 13.5 8.5 15.5 5.5 12 C 2 8.5 1.5 2 1.5 2 Z" />
-          <g stroke="hsl(35,90%,90%)" stroke-linecap="round">
-            <line class="hourglass__sand-grain-left" stroke-width="1" stroke-dasharray="0.25 33.75" x1="12" y1="15.75" x2="12" y2="20.75" />
-            <line class="hourglass__sand-grain-right" stroke-width="1" stroke-dasharray="0.25 33.75" x1="12.5" y1="16.75" x2="12.5" y2="21.75" />
-            <line class="hourglass__sand-drop" stroke-width="1" stroke-dasharray="0.5 107.5" x1="12.25" y1="18" x2="12.25" y2="31.5" />
-            <line class="hourglass__sand-fill" stroke-width="1.5" stroke-dasharray="54 54" x1="12.25" y1="14.75" x2="12.25" y2="31.5" />
-            <line class="hourglass__sand-line-left" stroke="hsl(35,90%,83%)" stroke-width="1" stroke-dasharray="1 107" x1="12" y1="16" x2="12" y2="31.5" />
-            <line class="hourglass__sand-line-right" stroke="hsl(35,90%,83%)" stroke-width="1" stroke-dasharray="12 96" x1="12.5" y1="16" x2="12.5" y2="31.5" />
-            <g fill="hsl(35,90%,90%)" stroke-width="0">
-              <path clip-path="url(#sand-mound-top)" d="M 12.25 15 L 15.392 13.486 C 21.737 11.168 22.5 2 22.5 2 L 2 2.013 C 2 2.013 2.753 11.046 9.009 13.438 L 12.25 15 Z" />
-              <path clip-path="url(#sand-mound-bottom)" d="M 12.25 18.5 L 15.392 20.014 C 21.737 22.332 22.5 31.5 22.5 31.5 L 2 31.487 C 2 31.487 2.753 22.454 9.009 20.062 Z" />
-            </g>
-          </g>
-          <g fill="none" opacity="0.7" stroke-linecap="round" stroke-width="2">
-            <path class="hourglass__glare-top" stroke="hsl(0,0%,100%)" d="M 19.437 3.421 C 19.437 3.421 19.671 6.454 17.914 8.846 C 16.157 11.238 14.5 11.5 14.5 11.5" />
-            <path class="hourglass__glare-bottom" stroke="hsla(0,0%,100%,0)" d="M 19.437 3.421 C 19.437 3.421 19.671 6.454 17.914 8.846 C 16.157 11.238 14.5 11.5 14.5 11.5" transform="rotate(180,12.25,16.75)" />
-          </g>
-          <rect fill="hsl(var(--hue),90%,50%)" width="24.5" height="2" />
-          <rect fill="hsl(var(--hue),90%,57.5%)" rx="0.5" ry="0.5" x="2.5" y="0.5" width="19.5" height="1" />
-          <rect fill="hsl(var(--hue),90%,50%)" y="31.5" width="24.5" height="2" />
-          <rect fill="hsl(var(--hue),90%,57.5%)" rx="0.5" ry="0.5" x="2.5" y="32" width="19.5" height="1" />
-        </g>
-      </g>
-    </svg>
+  <!-- PROGRESS -->
+  <div id="progress">
+    <div id="pbar"><div></div></div>
+    <span id="pcnt">0%</span>
+    <span id="ptext" class="muted"></span>
+    <button id="cancelJob" class="btn-sm btn-plain">İptal</button>
   </div>
 
   <div id="graph"></div>
@@ -316,7 +218,10 @@ HTML = r"""
 <script>
   let gPage = 1, gPageSize = 20;
   let fetching = false;
-  const selected = new Set(); // seçili id'ler (sayfalar arası korunur)
+  let gSinceId = null;            // <<< Yeni: sadece yeni kayıtlar için alt sınır id
+  let pollTimer = null;           // <<< Yeni: progress timer
+  let currentJobId = null;        // <<< Yeni: aktif job id
+  const selected = new Set();     // seçili id'ler (sayfalar arası korunur)
 
   const $ = (id)=>document.getElementById(id);
   function qs(params){ const p = new URLSearchParams(params); return p.toString(); }
@@ -345,6 +250,8 @@ HTML = r"""
       params.sort_by = by;
       params.sort_dir = dir;
     }
+    // <<< Yeni: yalnızca yeni eklenenleri listelemek için
+    if (gSinceId != null) params.min_id = gSinceId;
     return params;
   }
 
@@ -435,6 +342,8 @@ HTML = r"""
     if (f.year_to) p.set('max_year', f.year_to);
     p.set('limit', $('kwTopN').value || 50);
     p.set('min_count', $('kwMinCount').value || 2);
+    // <<< Yeni: yalnız yeni eklenenlere göre istatistik
+    if (gSinceId != null) p.set('min_id', gSinceId);
     return p.toString();
   }
 
@@ -485,9 +394,9 @@ HTML = r"""
       const row = document.createElement('div');
       row.className = 'bar';
       row.innerHTML = `
-        <div style="width:240px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="\${d.kw}">\${d.kw}</div>
-        <div class="w"><div style="width:\${(d.count/max*100).toFixed(0)}%"></div></div>
-        <div style="width:48px;text-align:right">\${d.count}</div>`;
+        <div style="width:240px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis" title="${d.kw}">${d.kw}</div>
+        <div class="w"><div style="width:${(d.count/max*100).toFixed(0)}%"></div></div>
+        <div style="width:48px;text-align:right">${d.count}</div>`;
       bars.appendChild(row);
     });
   }
@@ -583,12 +492,75 @@ HTML = r"""
     };
   }
 
+  // ---------- PROGRESS + CANCEL ----------
+  function showProgress(show){
+    $('progress').style.display = show ? 'flex' : 'none';
+  }
+
+  function setProgress(pct, text){
+    pct = Math.max(0, Math.min(100, pct|0));
+    $('pbar').firstElementChild.style.width = pct + '%';
+    $('pcnt').textContent = pct + '%';
+    $('ptext').textContent = text || '';
+  }
+
+  async function startPoll(jobId){
+    currentJobId = jobId;
+    showProgress(true);
+    setProgress(0, 'Başlatılıyor...');
+    if (pollTimer) clearInterval(pollTimer);
+
+    pollTimer = setInterval(async ()=>{
+      try{
+        const r = await fetch(`/search/progress/${jobId}`);
+        if(!r.ok) throw new Error('progress not found');
+        const j = await r.json();
+
+        // sunucu dönerse since_id'yi sabitle (güvence)
+        if (j.since_id != null && gSinceId == null) gSinceId = j.since_id;
+
+        let stageText = '';
+        if (j.stage === 'fetching') {
+          stageText = `Kaynaklardan sonuç toplanıyor (${j.source_done}/${j.source_total})`;
+        } else if (j.stage === 'processing') {
+          stageText = `Kayıtlar işleniyor (Kaydedilen: ${j.ingested}/${j.target})`;
+        } else if (j.stage === 'starting') {
+          stageText = 'Başlatılıyor...';
+        } else if (j.stage === 'done') {
+          stageText = 'Tamamlandı';
+        }
+        if (j.last_title) stageText += ` • Son: ${j.last_title}`;
+
+        setProgress(j.percent ?? 0, stageText);
+
+        if (j.status === 'done' || j.status === 'error' || j.status === 'cancelled'){
+          clearInterval(pollTimer); pollTimer = null; currentJobId = null;
+          showProgress(false);
+          await refreshList(1);
+          await renderViz();
+          $('status').innerText = (j.status === 'done') ? 'Tamamlandı.' :
+                                  (j.status === 'cancelled') ? 'İptal edildi.' :
+                                  'Hata oluştu.';
+          setBusy(false);
+        }
+      }catch(e){
+        clearInterval(pollTimer); pollTimer = null; currentJobId = null;
+        showProgress(false);
+        setBusy(false);
+      }
+    }, 700);
+  }
+
+  $('cancelJob').onclick = async ()=>{
+    if (!currentJobId) return;
+    try{ await fetch(`/search/cancel/${currentJobId}`, {method:'POST'}); }catch(_){}
+  };
+
   // ---------- STATE/BUTTONS ----------
   function setBusy(busy){
     fetching = busy;
     $('run').disabled = busy;
     $('status').innerText = busy ? 'Aranıyor, PDF indiriliyor...' : '';
-    $('loader').style.display = busy ? 'flex' : 'none';   // loader görünürlüğü
   }
 
   $('run').onclick = async ()=>{
@@ -596,25 +568,28 @@ HTML = r"""
     const n = parseInt(($('n').value || '8'), 10);
     if(!topic || fetching) return;
 
+    // yeni arama: sonuç alanlarını temizle
     document.querySelector('#tbl tbody').innerHTML = '';
     $('empty').style.display = 'none';
     $('graph').innerHTML = '';
     $('status').innerText = '';
+    gSinceId = null; // sunucudan gelecek since_id ile set edilecek
 
     setBusy(true);
     try{
-      await fetch('/search/run',{
+      const r = await fetch('/search/start', {
         method:'POST',
         headers:{'Content-Type':'application/json'},
-        body:JSON.stringify({topic,max_results:n})
+        body: JSON.stringify({topic, max_results:n})
       });
-      await refreshList(1);
-      await renderViz();
-      $('status').innerText = 'Tamamlandı.';
+      if(!r.ok) throw new Error('Başlatılamadı');
+      const { job_id, since_id } = await r.json();
+      gSinceId = since_id;            // yeni kayıtlar için alt sınır (yalnız yeni olanlar)
+      await startPoll(job_id);
     }catch(e){
       $('status').innerText = 'Hata: ' + e;
-    } finally {
       setBusy(false);
+      showProgress(false);
     }
   };
 
@@ -627,6 +602,7 @@ HTML = r"""
   $('reset').onclick = ()=>{
     ['fq','fauthor','fsource','fy1','fy2'].forEach(id=> $(id).value = '');
     $('fsort').value = 'year_desc';
+    // Not: gSinceId'yı koruyoruz; istersen burada null yaparak "tümünü göster"e dönebilirsin.
     refreshList(1);
     renderViz();
   };
@@ -642,7 +618,6 @@ HTML = r"""
 
   // Liste üstü indirme araç çubuğu
   $('dlAll').onclick = async ()=>{
-    setBusy(true); // loader'ı göster
     try{
       const r = await fetch('/download/batch', { method:'POST' });
       const j = await r.json().catch(()=> ({}));
@@ -653,8 +628,6 @@ HTML = r"""
       }
     }catch(e){
       $('status').innerText = 'Batch indirme hatası';
-    } finally {
-      setBusy(false); // loader'ı gizle
     }
   };
 
@@ -683,7 +656,6 @@ HTML = r"""
 
   $('dlSelectedBg').onclick = async ()=>{
     if(!selected.size){ $('status').innerText = 'Seçim yok.'; return; }
-    setBusy(true); // istersen seçili arkaplan için de göster
     const ids = Array.from(selected).join(',');
     try{
       const r = await fetch('/download/batch?'+new URLSearchParams({ids}), { method:'POST' });
@@ -695,8 +667,6 @@ HTML = r"""
       }
     }catch(e){
       $('status').innerText = 'Batch indirme hatası';
-    } finally {
-      setBusy(false);
     }
   };
 
@@ -706,7 +676,7 @@ HTML = r"""
   $('kwTopN').addEventListener('change', renderViz);
   $('kwMinCount').addEventListener('change', renderViz);
 
-  // İlk yükleme
+  // İlk yükleme (tüm kayıtlar)
   (async function firstLoad(){ await refreshList(1); await renderViz(); })();
 </script>
 </body>
