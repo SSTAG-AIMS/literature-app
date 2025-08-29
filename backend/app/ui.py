@@ -705,6 +705,9 @@ async function downloadViaProxy(paperId, ev, fallbackUrl){
   // İlk yükleme (tüm kayıtlar)
   (async function firstLoad(){ await refreshList(1); await renderViz(); })();
 </script>
+  <footer style="margin-top:32px; text-align:center; font-size:.85rem; color:#888;">
+   <p>© 2025 MAM Literatür Asistanı | Geliştirici: <strong>Kadir IR</strong> | Tüm hakları saklıdır.</p>
+  </footer>
 </body>
 </html>
 """
