@@ -255,14 +255,39 @@ HTML = """
     return params;
   }
 
-  function downloadViaProxy(paperId){
+async function downloadViaProxy(paperId, ev, fallbackUrl){
+  if (ev) { ev.preventDefault(); ev.stopPropagation(); } // çift tetik olmasın
+  try{
+    const r = await fetch(`/pdf/proxy/${paperId}`);
+    if(!r.ok){
+      // Sunucu "Direct PDF not available" döndüyse nazik fallback
+      const j = await r.json().catch(()=>null);
+      if (fallbackUrl) {
+        $('status').innerText = 'Doğrudan PDF bulunamadı, kaynak sayfası açılıyor...';
+        window.open(fallbackUrl, '_blank', 'noopener');
+      } else {
+        $('status').innerText = (j?.detail || 'PDF indirilemedi.');
+      }
+      return;
+    }
+    // PDF proxy’den geldi → blob indir
+    const blob = await r.blob();
+    const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
-    a.href = `/pdf/proxy/${paperId}`;
-    a.download = '';
+    a.href = url;
+    a.download = `${paperId}.pdf`;
     document.body.appendChild(a);
     a.click();
     a.remove();
+    setTimeout(()=> URL.revokeObjectURL(url), 1000);
+  }catch(err){
+    $('status').innerText = 'İndirme başarısız: ' + err.message;
+    if (fallbackUrl) window.open(fallbackUrl, '_blank', 'noopener');
   }
+}
+
+
+
 
   function showEmptyIfNeeded(items){
     $('empty').style.display = items.length ? 'none' : 'block';
@@ -445,7 +470,8 @@ HTML = """
       const tdAction = document.createElement('td'); tdAction.className = 'action';
       const btnDl = document.createElement('button');
       btnDl.className = 'btn-sm'; btnDl.textContent = '📥 İndir';
-      btnDl.addEventListener('click', (e)=>{ e.stopPropagation(); downloadViaProxy(p.db_id); });
+      //btnDl.addEventListener('click', (e)=>{ e.stopPropagation(); downloadViaProxy(p.db_id); });
+      btnDl.addEventListener('click', (e)=> downloadViaProxy(p.db_id, e, p.url_pdf));
 
       const btnSave = document.createElement('button');
       btnSave.className = 'btn-sm btn-plain'; btnSave.textContent = '💾 Sunucuya Kaydet';

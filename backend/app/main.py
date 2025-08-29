@@ -14,7 +14,8 @@ from urllib.parse import quote
 from uuid import uuid4
 import time
 from threading import Lock
-
+from urllib.parse import quote, urljoin
+import re
 import httpx
 import fitz  # PyMuPDF
 from fastapi import APIRouter, BackgroundTasks, Depends, FastAPI, HTTPException, Query
@@ -771,42 +772,111 @@ def pdf_redirect(paper_id: int, db: Session = Depends(get_db)):
         raise HTTPException(status_code=404, detail="PDF URL not found")
     return RedirectResponse(url=p.url_pdf, status_code=307)
 
+from urllib.parse import quote, urljoin
+import re
+
+
 @app.get("/pdf/proxy/{paper_id}")
 async def pdf_proxy(paper_id: int, db: Session = Depends(get_db)):
     p = db.query(Paper).filter(Paper.id == paper_id).one_or_none()
     if not p or not p.url_pdf:
         raise HTTPException(status_code=404, detail="PDF URL not found")
 
-    try:
-        async with httpx.AsyncClient(follow_redirects=True, timeout=60) as client:
-            r = await client.get(p.url_pdf)
-    except Exception:
-        raise HTTPException(status_code=502, detail="Upstream fetch failed")
-
-    if r.status_code != 200:
-        raise HTTPException(status_code=502, detail=f"Upstream responded {r.status_code}")
-
-    ctype = (r.headers.get("content-type") or "").lower()
-    if not (r.content[:5] == b"%PDF-" or "pdf" in ctype):
-        raise HTTPException(status_code=502, detail="Not a PDF")
-
-    raw_title = (p.title or f"paper_{p.id}").replace("/", "_").replace("\\", "_").strip()
-    raw_base = f"{p.id}_{raw_title}"[:200]
-
-    ascii_name = _safe_ascii_filename(raw_base, f"paper_{p.id}")
-    utf8_name = quote(raw_base + ".pdf", safe="")
-
-    content_disposition = _safe_http_header_value(
-        f'attachment; filename="{ascii_name}"; filename*=UTF-8\'\'{utf8_name}'
-    )
-
-    headers = {
-        "Content-Disposition": content_disposition,
-        "Content-Type": "application/pdf",
-        "Cache-Control": "no-store",
+    ua_headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+            "AppleWebKit/537.36 (KHTML, like Gecko) "
+            "Chrome/124.0 Safari/537.36"
+        ),
+        "Accept": "application/pdf,application/octet-stream;q=0.9,*/*;q=0.8",
+        "Accept-Language": "tr-TR,tr;q=0.9,en-US;q=0.8,en;q=0.7",
+        "Cache-Control": "no-cache",
     }
 
-    return StreamingResponse(io.BytesIO(r.content), headers=headers, media_type="application/pdf")
+    def _looks_like_pdf(resp: httpx.Response) -> bool:
+        ctype = (resp.headers.get("content-type") or "").lower()
+        return (resp.content[:5] == b"%PDF-" or "pdf" in ctype)
+
+    async def _try_get(url: str, client: httpx.AsyncClient) -> httpx.Response | None:
+        try:
+            r = await client.get(url, follow_redirects=True)
+            if r.status_code == 200 and _looks_like_pdf(r):
+                return r
+        except Exception:
+            return None
+        return None
+
+    # Basit HTML içinden .pdf linkleri çıkar (BS4 şartı yok, regex yeter)
+    _PDF_HREF = re.compile(r'href=["\']([^"\']+\.pdf)(?:\?[^"\']*)?["\']', re.I)
+
+    async with httpx.AsyncClient(timeout=60, headers=ua_headers) as client:
+        # 0) Eldeki url_pdf direkt PDF ise al
+        r = await _try_get(p.url_pdf, client)
+        if not r:
+            # 1) DOI varsa Unpaywall ile pdf’e yükseltmeyi dene
+            try:
+                email = getattr(settings, "unpaywall_email", "") or ""
+                if email and p.doi:
+                    rec = {"doi": p.doi, "url_pdf": p.url_pdf}
+                    await enrich_with_unpaywall(rec, email)
+                    if rec.get("url_pdf") and rec["url_pdf"] != p.url_pdf:
+                        r = await _try_get(rec["url_pdf"], client)
+                        if r:
+                            # İstersek DB’de url_pdf’yi güncelleyebiliriz
+                            try:
+                                p.url_pdf = rec["url_pdf"]
+                                db.add(p); db.commit()
+                            except Exception:
+                                db.rollback()
+            except Exception:
+                pass
+
+        if not r:
+            # 2) arXiv landing → pdf dönüştürme
+            u = (p.url_pdf or "")
+            if "arxiv.org/abs/" in u:
+                pdf_u = u.replace("/abs/", "/pdf/") + ".pdf"
+                r = await _try_get(pdf_u, client)
+
+        if not r:
+            # 3) Landing HTML’ini çek, içindeki ilk .pdf linkini bul
+            try:
+                landing = await client.get(p.url_pdf, follow_redirects=True)
+                if landing.status_code == 200 and "text/html" in (landing.headers.get("content-type") or "").lower():
+                    m = _PDF_HREF.search(landing.text or "")
+                    if m:
+                        cand = urljoin(str(landing.url), m.group(1))
+                        r = await _try_get(cand, client)
+                        if r:
+                            try:
+                                p.url_pdf = cand
+                                db.add(p); db.commit()
+                            except Exception:
+                                db.rollback()
+            except Exception:
+                pass
+
+        if not r:
+            # Hâlâ PDF bulamadık → 404 döndür (UI fallback ile kaynak sayfasını açacak)
+            raise HTTPException(status_code=404, detail="Direct PDF not available")
+
+        # --- Buraya geldiysek PDF byte’larımız var → indirilebilir response ---
+        raw_title = (p.title or f"paper_{p.id}").replace("/", "_").replace("\\", "_").strip()
+        raw_base  = f"{p.id}_{raw_title}"[:200]
+        ascii_name = _safe_ascii_filename(raw_base, f"paper_{p.id}")
+        utf8_name  = quote(raw_base + ".pdf", safe="")
+
+        content_disposition = _safe_http_header_value(
+            f'attachment; filename="{ascii_name}"; filename*=UTF-8\'\'{utf8_name}'
+        )
+        headers = {
+            "Content-Disposition": content_disposition,
+            "Content-Type": "application/pdf",
+            "Cache-Control": "no-store",
+        }
+        return StreamingResponse(io.BytesIO(r.content), headers=headers, media_type="application/pdf")
+
+
 
 # -------------------- Download: tekil / toplu / zip --------------------
 @app.post("/download/{paper_id}")
